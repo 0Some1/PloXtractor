@@ -1,5 +1,5 @@
 """
-LineFormer Dataset
+Line2Former Dataset
 Loads synthetic line plot data with COCO-style annotations.
 """
 
@@ -14,7 +14,7 @@ from .utils import resample_polyline, normalize_polyline
 from .transforms import get_train_transforms, get_val_transforms
 
 
-class LineFormerDataset(Dataset):
+class Line2FormerDataset(Dataset):
     """
     Dataset for line extraction from chart images.
 

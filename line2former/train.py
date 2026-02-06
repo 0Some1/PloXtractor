@@ -1,5 +1,5 @@
 """
-Training script for LineFormer
+Training script for Line2Former
 Uses PyTorch Lightning for clean, modular training.
 """
 
@@ -12,15 +12,15 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
-from lineformer.models import LineFormer
-from lineformer.losses import LineFormerLoss
-from lineformer.dataset import LineFormerDataset
+from line2former.models import Line2Former
+from line2former.losses import Line2FormerLoss
+from line2former.dataset import Line2FormerDataset
 from torch.utils.data import DataLoader
 
 
-class LineFormerLightning(pl.LightningModule):
+class Line2FormerLightning(pl.LightningModule):
     """
-    PyTorch Lightning wrapper for LineFormer.
+    PyTorch Lightning wrapper for Line2Former.
     """
 
     def __init__(
@@ -50,7 +50,7 @@ class LineFormerLightning(pl.LightningModule):
         self.save_hyperparameters()
 
         # Build model
-        self.model = LineFormer(
+        self.model = Line2Former(
             backbone_type=backbone_name,
             num_queries=num_queries,
             max_points=max_points,
@@ -60,7 +60,7 @@ class LineFormerLightning(pl.LightningModule):
         )
 
         # Build loss
-        self.criterion = LineFormerLoss(
+        self.criterion = Line2FormerLoss(
             weight_centerline=weight_centerline,
             weight_width=weight_width,
             weight_objectness=weight_objectness,
@@ -222,7 +222,7 @@ class LinePlotDataModule(pl.LightningDataModule):
         """Load datasets."""
         if stage == 'fit' or stage is None:
             # Training dataset
-            self.train_dataset = LineFormerDataset(
+            self.train_dataset = Line2FormerDataset(
                 data_root = self.data_root,
                 split='train',
                 max_lines=self.max_lines,
@@ -231,7 +231,7 @@ class LinePlotDataModule(pl.LightningDataModule):
             )
 
             # Validation dataset
-            self.val_dataset = LineFormerDataset(
+            self.val_dataset = Line2FormerDataset(
                 data_root=self.data_root,
                 split='val',
                 max_lines=self.max_lines,
@@ -265,7 +265,7 @@ class LinePlotDataModule(pl.LightningDataModule):
 
 def main():
     """Main training function."""
-    parser = argparse.ArgumentParser(description='Train LineFormer')
+    parser = argparse.ArgumentParser(description='Train Line2Former')
 
     # Data arguments
     parser.add_argument('--data_root', type=str, default=r"../data",
@@ -323,7 +323,7 @@ def main():
     )
 
     # Setup model
-    model = LineFormerLightning(
+    model = Line2FormerLightning(
         backbone_name=args.backbone,
         num_queries=args.num_queries,
         max_points=args.max_points,
@@ -344,7 +344,7 @@ def main():
     callbacks = [
         ModelCheckpoint(
             dirpath=output_dir / 'checkpoints',
-            filename='lineformer-{epoch:02d}-{val/loss:.4f}',
+            filename='line2former-{epoch:02d}-{val/loss:.4f}',
             monitor='val/loss',
             mode='min',
             save_top_k=3,
@@ -362,11 +362,11 @@ def main():
     loggers = [
         TensorBoardLogger(
             save_dir=output_dir / 'logs',
-            name='lineformer',
+            name='line2former',
         ),
         CSVLogger(
             save_dir=output_dir / 'logs',
-            name='lineformer',
+            name='line2former',
         ),
     ]
 

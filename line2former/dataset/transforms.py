@@ -1,5 +1,5 @@
 """
-Data Augmentation for LineFormer
+Data Augmentation for Line2Former
 Simplified version with manual transform handling.
 """
 
@@ -9,7 +9,7 @@ import albumentations as A
 from typing import Dict, List, Tuple
 
 
-class LineFormerTransform:
+class Line2FormerTransform:
     """
     Manual transform pipeline for images and polylines.
     More reliable than trying to integrate with albumentations DualTransform.
@@ -166,14 +166,14 @@ class LineFormerTransform:
         return image_rotated, polylines_rotated
 
 
-def get_train_transforms(image_size: [int, int] = (480, 640)) -> LineFormerTransform:
+def get_train_transforms(image_size: [int, int] = (480, 640)) -> Line2FormerTransform:
     """Get training transforms."""
-    return LineFormerTransform(image_size, is_train=True)
+    return Line2FormerTransform(image_size, is_train=True)
 
 
-def get_val_transforms(image_size: [int, int] = (480, 640)) -> LineFormerTransform:
+def get_val_transforms(image_size: [int, int] = (480, 640)) -> Line2FormerTransform:
     """Get validation transforms."""
-    return LineFormerTransform(image_size, is_train=False)
+    return Line2FormerTransform(image_size, is_train=False)
 
 
 def get_transforms(train: bool = True, image_size: tuple = (480, 640)):

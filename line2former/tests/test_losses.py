@@ -3,7 +3,7 @@ Test Loss Functions
 """
 
 import torch
-from losses import ChamferDistance, HungarianMatcher, LineFormerLoss, SimplifiedLineFormerLoss
+from line2former.losses import ChamferDistance, HungarianMatcher, Line2FormerLoss, SimplifiedLine2FormerLoss
 
 
 def test_chamfer_distance():
@@ -76,10 +76,10 @@ def test_hungarian_matcher():
     print("✓ Hungarian matcher test passed!\n")
 
 
-def test_lineformer_loss():
-    """Test complete LineFormer loss."""
+def test_line2former_loss():
+    """Test complete Line2Former loss."""
     print("=" * 60)
-    print("Testing LineFormer Loss")
+    print("Testing Line2Former Loss")
     print("=" * 60)
 
     B, N_queries, N_targets, P = 2, 20, 5, 50
@@ -103,7 +103,7 @@ def test_lineformer_loss():
     targets['valid_mask'][:, 3:] = False  # Only first 3 targets valid
 
     # Test full loss
-    loss_fn = LineFormerLoss(
+    loss_fn = Line2FormerLoss(
         weight_centerline=5.0,
         weight_width=1.0,
         weight_objectness=2.0,
@@ -124,7 +124,7 @@ def test_lineformer_loss():
     loss_dict['loss_total'].backward()
 
     print("✓ Backward pass successful")
-    print("✓ LineFormer loss test passed!\n")
+    print("✓ Line2Former loss test passed!\n")
 
 
 def test_simplified_loss():
@@ -147,7 +147,7 @@ def test_simplified_loss():
     }
     targets['valid_mask'][:, 3:] = False
 
-    loss_fn = SimplifiedLineFormerLoss()
+    loss_fn = SimplifiedLine2FormerLoss()
     loss_dict = loss_fn(outputs, targets)
 
     print("Simplified loss components:")
@@ -162,7 +162,7 @@ def test_simplified_loss():
 if __name__ == '__main__':
     test_chamfer_distance()
     test_hungarian_matcher()
-    test_lineformer_loss()
+    test_line2former_loss()
     test_simplified_loss()
 
     print("=" * 60)

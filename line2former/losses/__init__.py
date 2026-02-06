@@ -1,15 +1,15 @@
 """
-Loss Functions for LineFormer
+Loss Functions for Line2Former
 """
 
 from .chamfer import ChamferDistance, chamfer_distance
 from .matcher import HungarianMatcher
-from .composite import LineFormerLoss, SimplifiedLineFormerLoss
+from .composite import Line2FormerLoss, SimplifiedLine2FormerLoss
 
 __all__ = [
     'ChamferDistance',
     'chamfer_distance',
     'HungarianMatcher',
-    'LineFormerLoss',
-    'SimplifiedLineFormerLoss'
+    'Line2FormerLoss',
+    'SimplifiedLine2FormerLoss'
 ]

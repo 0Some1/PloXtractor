@@ -1,5 +1,5 @@
 """
-LineFormer: Main Model
+Line2Former: Main Model
 Combines all components for end-to-end line extraction.
 """
 
@@ -13,9 +13,9 @@ from .decoder import LineQueryDecoder, PositionalEncoding2D, LinePredictionHead
 from .renderer import DifferentiableLineRenderer
 
 
-class LineFormer(nn.Module):
+class Line2Former(nn.Module):
     """
-    LineFormer: Transformer-based model for line extraction from images.
+    Line2Former: Transformer-based model for line extraction from images.
 
     Architecture:
         1. High-resolution backbone (preserves spatial details)
@@ -245,9 +245,9 @@ class LineFormer(nn.Module):
         return predictions
 
 
-class LineFormerLite(nn.Module):
+class Line2FormerLite(nn.Module):
     """
-    Lightweight version of LineFormer for faster training/testing.
+    Lightweight version of Line2Former for faster training/testing.
     Simplified architecture with fewer parameters.
     """
 

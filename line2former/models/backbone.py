@@ -1,5 +1,5 @@
 """
-High-Resolution Backbone for LineFormer
+High-Resolution Backbone for Line2Former
 Preserves spatial resolution for thin line detection.
 """
 

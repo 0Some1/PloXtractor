@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
-from dataset import LineFormerDataset
+from line2former.dataset import Line2FormerDataset
 
 
 def denormalize_image(img_tensor):
@@ -260,11 +260,11 @@ def test_coordinate_accuracy(dataset, num_tests=5):
 def test_dataset():
     """Test dataset loading and transformations."""
     print("=" * 60)
-    print("Testing LineFormer Dataset")
+    print("Testing Line2Former Dataset")
     print("=" * 60)
 
     # Create dataset
-    dataset = LineFormerDataset(
+    dataset = Line2FormerDataset(
         data_root='../data',
         split='train',
         max_lines=20,

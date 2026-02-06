@@ -1,19 +1,19 @@
 """
-Test LineFormer Model
+Test Line2Former Model
 """
 
 import torch
-from models import LineFormer, LineFormerLite
+from line2former.models import Line2Former, Line2FormerLite
 
 
-def test_lineformer():
-    """Test full LineFormer model."""
+def test_line2former():
+    """Test full Line2Former model."""
     print("=" * 60)
-    print("Testing LineFormer")
+    print("Testing Line2Former")
     print("=" * 60)
 
     # Create model
-    model = LineFormer(
+    model = Line2Former(
         num_queries=20,
         max_points=50,
         d_model=256,
@@ -56,17 +56,17 @@ def test_lineformer():
         if isinstance(value, torch.Tensor):
             print(f"  {key}: {value.shape}")
 
-    print("\n✓ LineFormer test passed!")
+    print("\n✓ Line2Former test passed!")
 
 
-def test_lineformer_lite():
-    """Test lightweight LineFormer model."""
+def test_line2former_lite():
+    """Test lightweight Line2Former model."""
     print("\n" + "=" * 60)
-    print("Testing LineFormerLite")
+    print("Testing Line2FormerLite")
     print("=" * 60)
 
     # Create model
-    model = LineFormerLite(
+    model = Line2FormerLite(
         num_queries=20,
         max_points=50,
         d_model=128,
@@ -100,12 +100,12 @@ def test_lineformer_lite():
         if isinstance(value, torch.Tensor):
             print(f"  {key}: {value.shape}")
 
-    print("\n✓ LineFormerLite test passed!")
+    print("\n✓ Line2FormerLite test passed!")
 
 
 if __name__ == '__main__':
-    test_lineformer()
-    test_lineformer_lite()
+    test_line2former()
+    test_line2former_lite()
 
     print("\n" + "=" * 60)
     print("All model tests passed! ✓")

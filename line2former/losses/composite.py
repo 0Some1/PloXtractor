@@ -1,5 +1,5 @@
 """
-Composite Loss for LineFormer
+Composite Loss for Line2Former
 Combines multiple loss components with Hungarian matching.
 """
 
@@ -12,9 +12,9 @@ from .chamfer import chamfer_distance, ChamferDistance
 from .matcher import HungarianMatcher
 
 
-class LineFormerLoss(nn.Module):
+class Line2FormerLoss(nn.Module):
     """
-    Complete loss function for LineFormer training.
+    Complete loss function for Line2Former training.
 
     Components:
     1. Centerline loss (Chamfer distance)
@@ -363,7 +363,7 @@ class LineFormerLoss(nn.Module):
         return 1.0 - dice.mean()
 
 
-class SimplifiedLineFormerLoss(nn.Module):
+class SimplifiedLine2FormerLoss(nn.Module):
     """
     Simplified loss for quick prototyping.
     Uses greedy matching instead of Hungarian.

@@ -1,10 +1,10 @@
 """
-LineFormer Data Module
+Line2Former Data Module
 Handles dataset loading, transformations, and polyline utilities.
 """
 
-from .dataset import LineFormerDataset
-from .transforms import LineFormerTransform, get_train_transforms, get_val_transforms,get_transforms
+from .dataset import Line2FormerDataset
+from .transforms import Line2FormerTransform, get_train_transforms, get_val_transforms,get_transforms
 from .utils import (
     resample_polyline,
     polyline_length,
@@ -17,8 +17,8 @@ from .utils import (
 )
 
 __all__ = [
-    'LineFormerDataset',
-    'LineFormerTransform',
+    'Line2FormerDataset',
+    'Line2FormerTransform',
     'get_train_transforms',
     'get_transforms',
     'get_val_transforms',
