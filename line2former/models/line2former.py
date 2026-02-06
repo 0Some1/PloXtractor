@@ -7,7 +7,12 @@ import torch
 import torch.nn as nn
 from typing import Dict, Tuple
 
-from .backbone import HighResBackbone, LightweightBackbone
+from .backbone import (
+    PretrainedHRNetBackbone,
+    DilatedResNetBackbone,
+    HighResBackbone,
+    LightweightBackbone,
+)
 from .line_aware_conv import LineAwareFeatureExtractor
 from .decoder import LineQueryDecoder, PositionalEncoding2D, LinePredictionHead
 from .renderer import DifferentiableLineRenderer
@@ -25,6 +30,14 @@ class Line2Former(nn.Module):
         5. Differentiable line renderer (for training)
     """
 
+    # Supported backbone types
+    BACKBONE_TYPES = {
+        'hrnet_w18', 'hrnet_w32', 'hrnet_w48',  # pretrained HRNet via timm
+        'dilated_resnet50',                       # pretrained ResNet-50 (torchvision)
+        'hrnet',                                  # custom HRNet (no pretrained)
+        'lightweight',                            # simple CNN (no pretrained)
+    }
+
     def __init__(
             self,
             # Model config
@@ -33,8 +46,9 @@ class Line2Former(nn.Module):
             d_model: int = 256,
 
             # Backbone config
-            backbone_type: str = 'lightweight',  # 'lightweight' or 'hrnet'
+            backbone_type: str = 'hrnet_w32',
             backbone_channels: int = 256,
+            pretrained: bool = True,
 
             # Decoder config
             num_decoder_layers: int = 6,
@@ -55,8 +69,10 @@ class Line2Former(nn.Module):
             num_queries: Maximum number of lines per image
             max_points: Maximum points per polyline
             d_model: Hidden dimension
-            backbone_type: 'lightweight' or 'hrnet'
+            backbone_type: One of 'hrnet_w18', 'hrnet_w32', 'hrnet_w48',
+                           'dilated_resnet50', 'hrnet', 'lightweight'
             backbone_channels: Output channels from backbone
+            pretrained: Load ImageNet-pretrained weights (for hrnet_w*/dilated_resnet50)
             num_decoder_layers: Number of transformer decoder layers
             num_heads: Number of attention heads
             dim_feedforward: FFN hidden dimension
@@ -74,10 +90,16 @@ class Line2Former(nn.Module):
         self.image_size = image_size
 
         # 1. Backbone
-        if backbone_type == 'lightweight':
-            self.backbone = LightweightBackbone(
-                in_channels=3,
+        if backbone_type in ('hrnet_w18', 'hrnet_w32', 'hrnet_w48'):
+            self.backbone = PretrainedHRNetBackbone(
+                variant=backbone_type,
                 output_channels=backbone_channels,
+                pretrained=pretrained,
+            )
+        elif backbone_type == 'dilated_resnet50':
+            self.backbone = DilatedResNetBackbone(
+                output_channels=backbone_channels,
+                pretrained=pretrained,
             )
         elif backbone_type == 'hrnet':
             self.backbone = HighResBackbone(
@@ -85,8 +107,16 @@ class Line2Former(nn.Module):
                 base_channels=64,
                 output_channels=backbone_channels,
             )
+        elif backbone_type == 'lightweight':
+            self.backbone = LightweightBackbone(
+                in_channels=3,
+                output_channels=backbone_channels,
+            )
         else:
-            raise ValueError(f"Unknown backbone type: {backbone_type}")
+            raise ValueError(
+                f"Unknown backbone type: '{backbone_type}'. "
+                f"Choose from {sorted(self.BACKBONE_TYPES)}"
+            )
 
         # 2. Line-aware feature extraction
         if use_line_aware:
@@ -148,7 +178,7 @@ class Line2Former(nn.Module):
             outputs: Dictionary containing:
                 - centerlines: (B, num_queries, max_points, 2) predicted polylines
                 - widths: (B, num_queries, max_points) predicted widths
-                - objectness: (B, num_queries) objectness scores
+                - objectness: (B, num_queries) objectness scores (logits)
                 - masks: (B, num_queries, H, W) rendered masks (if return_features=True)
         """
         B = images.shape[0]
@@ -176,8 +206,8 @@ class Line2Former(nn.Module):
 
         # Optional: Render masks
         if return_features:
-            # Create valid mask from objectness
-            valid_mask = objectness > 0.5
+            # Apply sigmoid to logits for thresholding
+            valid_mask = objectness.sigmoid() > 0.5
 
             # Render masks
             masks = self.renderer(centerlines, widths, valid_mask)
@@ -199,13 +229,13 @@ class Line2Former(nn.Module):
         Args:
             centerlines: (B, num_queries, max_points, 2)
             widths: (B, num_queries, max_points)
-            objectness: (B, num_queries)
-            threshold: Objectness threshold
+            objectness: (B, num_queries) logits
+            threshold: Objectness probability threshold
 
         Returns:
             masks: (B, num_queries, H, W)
         """
-        valid_mask = objectness > threshold
+        valid_mask = objectness.sigmoid() > threshold
         masks = self.renderer(centerlines, widths, valid_mask)
         return masks
 
@@ -220,7 +250,7 @@ class Line2Former(nn.Module):
 
         Args:
             images: (B, 3, H, W)
-            objectness_threshold: Threshold for filtering predictions
+            objectness_threshold: Probability threshold for filtering predictions
 
         Returns:
             predictions: Dictionary with filtered predictions
@@ -231,10 +261,9 @@ class Line2Former(nn.Module):
         widths = outputs['widths']
         objectness = outputs['objectness']
 
-        # Filter by objectness
-        valid_mask = objectness > objectness_threshold
+        # Filter by objectness (apply sigmoid to convert logits to probabilities)
+        valid_mask = objectness.sigmoid() > objectness_threshold
 
-        # Apply mask
         predictions = {
             'centerlines': centerlines,
             'widths': widths,
@@ -279,11 +308,10 @@ class Line2FormerLite(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # After: Add assertion
         assert d_model % 4 == 0, "d_model must be divisible by 4 for positional encoding"
         self.pos_encoder = PositionalEncoding2D(
             d_model=d_model,
-            max_h=image_size[0] // 4 + 16,  # Add padding for safety
+            max_h=image_size[0] // 4 + 16,
             max_w=image_size[1] // 4 + 16,
         )
 

@@ -1,17 +1,225 @@
 """
 High-Resolution Backbone for Line2Former
-Preserves spatial resolution for thin line detection.
+
+Supports:
+  - 'hrnet_w18', 'hrnet_w32', 'hrnet_w48': Pretrained HRNet from timm
+  - 'dilated_resnet50': Pretrained ResNet-50 with dilated convolutions (torchvision)
+  - 'lightweight': Simple CNN for fast prototyping (no pretrained weights)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List
+from typing import List
 
+
+class PretrainedHRNetBackbone(nn.Module):
+    """
+    Pretrained HRNet backbone from timm.
+
+    HRNet maintains parallel multi-resolution branches throughout the network,
+    making it ideal for thin-structure detection. The highest-resolution branch
+    stays at 1/4 input resolution.
+
+    Requires: pip install timm
+    """
+
+    def __init__(
+            self,
+            variant: str = 'hrnet_w32',
+            output_channels: int = 256,
+            pretrained: bool = True,
+    ):
+        """
+        Args:
+            variant: HRNet variant ('hrnet_w18', 'hrnet_w32', 'hrnet_w48')
+            output_channels: Desired output channel dimension
+            pretrained: Whether to load ImageNet-pretrained weights
+        """
+        super().__init__()
+
+        import timm
+
+        # Create HRNet as a feature extractor (no classification head)
+        self.hrnet = timm.create_model(
+            variant,
+            pretrained=pretrained,
+            features_only=True,
+        )
+
+        # timm HRNet with features_only returns a list of feature maps.
+        # Inspect the channel counts from the model's feature_info.
+        feature_info = self.hrnet.feature_info.channels()
+
+        # HRNet features_only typically returns features at multiple scales.
+        # We take the highest-resolution feature (index 0, stride 4) and
+        # optionally fuse lower-resolution features into it.
+        self._feature_channels = feature_info
+
+        # Fusion: project each resolution branch and upsample to 1/4 resolution
+        self.upsample_layers = nn.ModuleList()
+        for i, ch in enumerate(feature_info):
+            layers = [
+                nn.Conv2d(ch, output_channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(output_channels),
+            ]
+            self.upsample_layers.append(nn.Sequential(*layers))
+
+        # Final 3x3 conv after fusion
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(output_channels, output_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(output_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, 3, H, W) input image
+
+        Returns:
+            features: (B, output_channels, H/4, W/4)
+        """
+        # Extract multi-scale features
+        feature_maps = self.hrnet(x)  # list of tensors at different scales
+
+        # Target spatial size: the highest-resolution feature map (1/4)
+        target_h, target_w = feature_maps[0].shape[2:]
+
+        # Project each scale and upsample to target resolution, then sum
+        fused = None
+        for i, feat in enumerate(feature_maps):
+            projected = self.upsample_layers[i](feat)
+            if projected.shape[2:] != (target_h, target_w):
+                projected = F.interpolate(
+                    projected,
+                    size=(target_h, target_w),
+                    mode='bilinear',
+                    align_corners=False,
+                )
+            if fused is None:
+                fused = projected
+            else:
+                fused = fused + projected
+
+        return self.fusion_conv(fused)
+
+
+class DilatedResNetBackbone(nn.Module):
+    """
+    Pretrained ResNet-50 with dilated (atrous) convolutions.
+
+    Replaces stride-2 in layer3 and layer4 with dilated convolutions so the
+    output stays at 1/4 resolution (instead of the usual 1/32). This is the
+    same approach used in DeepLab and DETR.
+
+    Uses torchvision only (no extra dependencies).
+    """
+
+    def __init__(
+            self,
+            output_channels: int = 256,
+            pretrained: bool = True,
+    ):
+        super().__init__()
+
+        import torchvision.models as tv_models
+
+        weights = tv_models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+        resnet = tv_models.resnet50(weights=weights)
+
+        # Keep layers up to 1/4 resolution (stem + layer1 = stride 4)
+        self.stem = nn.Sequential(
+            resnet.conv1,   # stride 2 -> 1/2
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,  # stride 2 -> 1/4
+        )
+        self.layer1 = resnet.layer1  # 1/4, 256 ch
+
+        # layer2: keep stride 2 -> 1/8
+        self.layer2 = resnet.layer2  # 1/8, 512 ch
+
+        # layer3: replace stride with dilation=2 -> stays 1/8
+        self.layer3 = resnet.layer3  # 1/8 with dilation, 1024 ch
+        self._replace_stride_with_dilation(self.layer3, dilation=2)
+
+        # layer4: replace stride with dilation=4 -> stays 1/8
+        self.layer4 = resnet.layer4  # 1/8 with dilation, 2048 ch
+        self._replace_stride_with_dilation(self.layer4, dilation=4)
+
+        # Project layer1 (1/4, 256ch) directly
+        self.proj_layer1 = nn.Sequential(
+            nn.Conv2d(256, output_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(output_channels),
+        )
+
+        # Project layer4 (1/8, 2048ch) and upsample to 1/4
+        self.proj_layer4 = nn.Sequential(
+            nn.Conv2d(2048, output_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(output_channels),
+        )
+
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(output_channels, output_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(output_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    @staticmethod
+    def _replace_stride_with_dilation(layer: nn.Module, dilation: int):
+        """Replace stride-2 convolutions with dilation in a ResNet layer."""
+        for name, module in layer.named_modules():
+            if isinstance(module, nn.Conv2d):
+                if module.stride == (2, 2):
+                    module.stride = (1, 1)
+                    module.dilation = (dilation, dilation)
+                    module.padding = (dilation * (module.kernel_size[0] - 1) // 2,
+                                      dilation * (module.kernel_size[1] - 1) // 2)
+            # Also fix the downsample layer's stride
+            if isinstance(module, nn.Sequential) and name == '0.downsample':
+                for sub in module.modules():
+                    if isinstance(sub, nn.Conv2d) and sub.stride == (2, 2):
+                        sub.stride = (1, 1)
+
+        # Fix the downsample in the first block directly
+        if hasattr(layer[0], 'downsample') and layer[0].downsample is not None:
+            for sub in layer[0].downsample.modules():
+                if isinstance(sub, nn.Conv2d) and sub.stride == (2, 2):
+                    sub.stride = (1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, 3, H, W)
+
+        Returns:
+            features: (B, output_channels, H/4, W/4)
+        """
+        x = self.stem(x)          # (B, 64, H/4, W/4)
+        c1 = self.layer1(x)       # (B, 256, H/4, W/4)
+        c2 = self.layer2(c1)      # (B, 512, H/8, W/8)
+        c3 = self.layer3(c2)      # (B, 1024, H/8, W/8)  dilated
+        c4 = self.layer4(c3)      # (B, 2048, H/8, W/8)  dilated
+
+        # Fuse high-res (layer1) with deep features (layer4)
+        feat_high = self.proj_layer1(c1)  # (B, out_ch, H/4, W/4)
+        feat_deep = self.proj_layer4(c4)  # (B, out_ch, H/8, W/8)
+        feat_deep = F.interpolate(
+            feat_deep,
+            size=feat_high.shape[2:],
+            mode='bilinear',
+            align_corners=False,
+        )
+
+        return self.fusion_conv(feat_high + feat_deep)
+
+
+# ---------- Original custom backbones (kept for backward compatibility) ----------
 
 class HighResBackbone(nn.Module):
     """
-    High-resolution feature extractor based on HRNet architecture.
+    Custom high-resolution feature extractor (HRNet-style, no pretrained weights).
     Maintains 1/4 resolution instead of 1/32 to preserve thin line details.
     """
 
@@ -22,13 +230,6 @@ class HighResBackbone(nn.Module):
             output_channels: int = 256,
             num_stages: int = 3,
     ):
-        """
-        Args:
-            in_channels: Input image channels (3 for RGB)
-            base_channels: Base number of channels
-            output_channels: Final output channels
-            num_stages: Number of parallel resolution stages
-        """
         super().__init__()
 
         self.in_channels = in_channels
@@ -48,11 +249,9 @@ class HighResBackbone(nn.Module):
         # Multi-resolution parallel branches
         self.stage1 = self._make_stage(base_channels, base_channels, num_blocks=2)
 
-        # Stage 2: Add transition layers
         self.transition1 = self._make_transition_layer([base_channels], [base_channels, base_channels * 2])
         self.stage2 = self._make_parallel_stages([base_channels, base_channels * 2], num_blocks=2)
 
-        # Stage 3: Add transition layers
         self.transition2 = self._make_transition_layer(
             [base_channels, base_channels * 2],
             [base_channels, base_channels * 2, base_channels * 4]
@@ -62,14 +261,12 @@ class HighResBackbone(nn.Module):
             num_blocks=3
         )
 
-        # Fusion layer: Merge all resolutions to highest resolution
-        self.fusion = self._make_fusion_layer(
+        self.fusion = FusionModule(
             [base_channels, base_channels * 2, base_channels * 4],
             output_channels
         )
 
     def _make_stage(self, in_channels: int, out_channels: int, num_blocks: int) -> nn.Sequential:
-        """Create a single-resolution stage."""
         layers = []
         for i in range(num_blocks):
             layers.append(ResidualBlock(
@@ -79,20 +276,12 @@ class HighResBackbone(nn.Module):
         return nn.Sequential(*layers)
 
     def _make_parallel_stages(self, channels_list: List[int], num_blocks: int) -> nn.ModuleList:
-        """Create parallel stages at different resolutions."""
         stages = nn.ModuleList()
         for channels in channels_list:
             stages.append(self._make_stage(channels, channels, num_blocks))
         return stages
 
     def _make_transition_layer(self, in_channels_list: List[int], out_channels_list: List[int]) -> nn.ModuleList:
-        """
-        Create transition layers to change number of branches and channels.
-
-        Args:
-            in_channels_list: List of input channels for each branch
-            out_channels_list: List of output channels for each branch
-        """
         num_in = len(in_channels_list)
         num_out = len(out_channels_list)
 
@@ -100,7 +289,6 @@ class HighResBackbone(nn.Module):
 
         for i in range(num_out):
             if i < num_in:
-                # Branch already exists, just adjust channels if needed
                 if in_channels_list[i] != out_channels_list[i]:
                     transition_layers.append(nn.Sequential(
                         nn.Conv2d(in_channels_list[i], out_channels_list[i], 3, 1, 1, bias=False),
@@ -110,7 +298,6 @@ class HighResBackbone(nn.Module):
                 else:
                     transition_layers.append(nn.Identity())
             else:
-                # New branch, downsample from previous branch
                 downsample_layers = []
                 for j in range(i - num_in + 1):
                     in_ch = in_channels_list[-1] if j == 0 else out_channels_list[i]
@@ -124,38 +311,18 @@ class HighResBackbone(nn.Module):
 
         return transition_layers
 
-    def _make_fusion_layer(self, in_channels_list: List[int], out_channels: int) -> nn.Module:
-        """Fuse multi-resolution features to single high-res output."""
-        return FusionModule(in_channels_list, out_channels)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, 3, H, W) input image
-
-        Returns:
-            features: (B, output_channels, H/4, W/4) high-res features
-        """
-        # Stem: (B, 3, H, W) -> (B, C, H/4, W/4)
         x = self.stem(x)
-
-        # Stage 1: Single resolution
         x1 = self.stage1(x)
 
-        # Transition 1: Create multi-resolution branches
         x_list = []
         for i, transition in enumerate(self.transition1):
-            if i == 0:
-                x_list.append(transition(x1))
-            else:
-                x_list.append(transition(x1))
+            x_list.append(transition(x1))
 
-        # Stage 2: Two parallel resolutions
         stage2_out = []
         for i, stage in enumerate(self.stage2):
             stage2_out.append(stage(x_list[i]))
 
-        # Transition 2: Expand to three branches
         x_list = []
         for i, transition in enumerate(self.transition2):
             if i < len(stage2_out):
@@ -163,14 +330,11 @@ class HighResBackbone(nn.Module):
             else:
                 x_list.append(transition(stage2_out[-1]))
 
-        # Stage 3: Three parallel resolutions
         stage3_out = []
         for i, stage in enumerate(self.stage3):
             stage3_out.append(stage(x_list[i]))
 
-        # Fusion: Merge all resolutions to highest resolution
         features = self.fusion(stage3_out)
-
         return features
 
 
@@ -210,22 +374,15 @@ class FusionModule(nn.Module):
     def __init__(self, in_channels_list: List[int], out_channels: int):
         super().__init__()
 
-        # Upsample and project each resolution to the highest resolution
         self.upsample_layers = nn.ModuleList()
         for i, in_channels in enumerate(in_channels_list):
             layers = []
-
-            # Project channels
             layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
             layers.append(nn.BatchNorm2d(out_channels))
-
-            # Upsample if not highest resolution
             if i > 0:
                 layers.append(nn.Upsample(scale_factor=2 ** i, mode='bilinear', align_corners=True))
-
             self.upsample_layers.append(nn.Sequential(*layers))
 
-        # Final fusion conv
         self.fusion_conv = nn.Sequential(
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
@@ -233,26 +390,13 @@ class FusionModule(nn.Module):
         )
 
     def forward(self, features_list: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Args:
-            features_list: List of features at different resolutions
-                [x1: (B, C1, H/4, W/4), x2: (B, C2, H/8, W/8), x3: (B, C3, H/16, W/16)]
-
-        Returns:
-            fused: (B, out_channels, H/4, W/4)
-        """
-        # Upsample and sum all features
         fused = 0
         for i, features in enumerate(features_list):
             fused = fused + self.upsample_layers[i](features)
-
-        # Final fusion
         fused = self.fusion_conv(fused)
-
         return fused
 
 
-# Lightweight version for faster training/testing
 class LightweightBackbone(nn.Module):
     """Simplified backbone for faster prototyping."""
 
@@ -264,33 +408,23 @@ class LightweightBackbone(nn.Module):
         super().__init__()
 
         self.backbone = nn.Sequential(
-            # 1/2 resolution
             nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
 
-            # 1/4 resolution
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
 
-            # Residual blocks at 1/4 resolution
             ResidualBlock(128, 128),
             ResidualBlock(128, 128),
             ResidualBlock(128, 256),
             ResidualBlock(256, 256),
 
-            # Final projection
             nn.Conv2d(256, output_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(output_channels),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, 3, H, W)
-        Returns:
-            features: (B, output_channels, H/4, W/4)
-        """
         return self.backbone(x)

@@ -276,8 +276,9 @@ def main():
                         help='Validation annotation file')
 
     # Model arguments
-    parser.add_argument('--backbone', type=str, default='hrnet',
-                        choices=['hrnet', 'resnet50', 'custom_cnn'])
+    parser.add_argument('--backbone', type=str, default='hrnet_w32',
+                        choices=['hrnet_w18', 'hrnet_w32', 'hrnet_w48',
+                                 'dilated_resnet50', 'hrnet', 'lightweight'])
     parser.add_argument('--num_queries', type=int, default=20)
     parser.add_argument('--max_points', type=int, default=50)
     parser.add_argument('--d_model', type=int, default=256)

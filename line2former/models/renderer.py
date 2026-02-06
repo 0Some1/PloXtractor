@@ -1,6 +1,9 @@
 """
 Differentiable Line Renderer
 Converts predicted polylines + widths to binary masks for supervision.
+
+Memory-efficient: processes one line at a time instead of materializing the
+full (B, N, H, W) coordinate grid simultaneously.
 """
 
 import torch
@@ -12,6 +15,10 @@ class DifferentiableLineRenderer(nn.Module):
     """
     Renders polylines as binary masks using differentiable operations.
     Uses soft rasterization for gradient flow.
+
+    Memory strategy: iterates over lines (N dimension) and segments (P dimension)
+    one at a time, keeping only a (B, H*W) distance buffer per line.  This reduces
+    peak memory from O(B*N*H*W) to O(B*H*W).
     """
 
     def __init__(
@@ -29,13 +36,14 @@ class DifferentiableLineRenderer(nn.Module):
         self.image_size = image_size
         self.sigma = sigma
 
-        # Create coordinate grids
+        # Create coordinate grids once: (H*W, 2)
         H, W = image_size
-        y_coords = torch.linspace(0, 1, H).view(-1, 1).repeat(1, W)
-        x_coords = torch.linspace(0, 1, W).view(1, -1).repeat(H, 1)
-
-        # (H, W, 2)
-        pixel_coords = torch.stack([x_coords, y_coords], dim=-1)
+        y_coords = torch.linspace(0, 1, H)
+        x_coords = torch.linspace(0, 1, W)
+        # grid_y, grid_x each (H, W)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        # (H*W, 2) with [x, y] ordering to match centerline format
+        pixel_coords = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=-1)
         self.register_buffer('pixel_coords', pixel_coords)
 
     def forward(
@@ -57,85 +65,94 @@ class DifferentiableLineRenderer(nn.Module):
         """
         B, N, P, _ = centerlines.shape
         H, W = self.image_size
+        M = H * W  # number of pixels
 
-        # Expand pixel coordinates: (1, 1, H, W, 2)
-        pixel_coords = self.pixel_coords.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W, 2)
-        pixel_coords = pixel_coords.repeat(B, N, 1, 1, 1)  # (B, N, H, W, 2)
+        # pixel_coords: (M, 2) — shared across batch & lines
+        pixel_coords = self.pixel_coords  # (M, 2)
 
-        # Initialize mask
-        masks = torch.zeros(B, N, H, W, device=centerlines.device)
+        masks_list = []
 
-        # For each line segment
-        for i in range(P - 1):
-            p1 = centerlines[:, :, i, :]  # (B, N, 2)
-            p2 = centerlines[:, :, i + 1, :]  # (B, N, 2)
-            w = widths[:, :, i]  # (B, N)
+        for n in range(N):
+            # Extract this line across the batch: (B, P, 2) and (B, P)
+            line_pts = centerlines[:, n]   # (B, P, 2)
+            line_w = widths[:, n]          # (B, P)
+            line_valid = valid_mask[:, n]  # (B,)
 
-            # Compute distance from each pixel to line segment
-            dist = self._point_to_segment_distance(
-                pixel_coords.view(B, N, H * W, 2),
-                p1,
-                p2
-            )  # (B, N, H*W)
+            # Accumulate the maximum Gaussian response across all segments
+            # Start with zeros: (B, M)
+            line_mask = torch.zeros(B, M, device=centerlines.device)
 
-            dist = dist.view(B, N, H, W)
+            for i in range(P - 1):
+                p1 = line_pts[:, i, :]      # (B, 2)
+                p2 = line_pts[:, i + 1, :]  # (B, 2)
+                w = line_w[:, i]            # (B,)
 
-            # Convert width to normalized coordinates
-            w_normalized = w / W  # Approximate normalization
-            w_normalized = w_normalized.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
+                # Compute distance from every pixel to this segment
+                dist = self._point_to_segment_distance_batched(
+                    pixel_coords, p1, p2
+                )  # (B, M)
 
-            # Soft rasterization using Gaussian
-            segment_mask = torch.exp(-(dist ** 2) / (2 * (w_normalized * self.sigma) ** 2))
+                # Normalized width (convert pixel width to [0,1] coordinate space)
+                # Use geometric mean of H and W for non-square images
+                scale = (H * W) ** 0.5
+                w_normalized = w / scale  # (B,)
+                w_normalized = w_normalized.unsqueeze(-1)  # (B, 1)
 
-            # Accumulate (max to avoid double-counting)
-            masks = torch.max(masks, segment_mask)
+                # Soft rasterization via Gaussian
+                segment_mask = torch.exp(
+                    -(dist ** 2) / (2.0 * (w_normalized * self.sigma) ** 2 + 1e-8)
+                )  # (B, M)
 
-        # Apply valid mask
-        valid_mask = valid_mask.unsqueeze(-1).unsqueeze(-1)  # (B, N, 1, 1)
-        masks = masks * valid_mask.float()
+                line_mask = torch.max(line_mask, segment_mask)
 
+            # Mask out invalid lines: (B,) -> (B, 1)
+            line_mask = line_mask * line_valid.float().unsqueeze(-1)
+
+            # Reshape to (B, H, W) and collect
+            masks_list.append(line_mask.view(B, H, W))
+
+        # Stack along line dimension: (B, N, H, W)
+        masks = torch.stack(masks_list, dim=1)
         return masks
 
-    def _point_to_segment_distance(
-            self,
-            points: torch.Tensor,
+    @staticmethod
+    def _point_to_segment_distance_batched(
+            pixels: torch.Tensor,
             p1: torch.Tensor,
             p2: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute distance from points to line segment.
+        Compute distance from every pixel to a line segment, batched over B.
 
         Args:
-            points: (B, N, M, 2) query points
-            p1: (B, N, 2) segment start
-            p2: (B, N, 2) segment end
+            pixels: (M, 2) pixel coordinates (shared across batch)
+            p1: (B, 2) segment start
+            p2: (B, 2) segment end
 
         Returns:
-            distances: (B, N, M) distances
+            distances: (B, M)
         """
-        # Expand dimensions
-        p1 = p1.unsqueeze(2)  # (B, N, 1, 2)
-        p2 = p2.unsqueeze(2)  # (B, N, 1, 2)
+        # Expand: p1 (B, 1, 2), p2 (B, 1, 2), pixels (1, M, 2)
+        p1 = p1.unsqueeze(1)       # (B, 1, 2)
+        p2 = p2.unsqueeze(1)       # (B, 1, 2)
+        px = pixels.unsqueeze(0)   # (1, M, 2)
 
-        # Vector from p1 to p2
-        v = p2 - p1  # (B, N, 1, 2)
+        # Segment direction
+        v = p2 - p1                # (B, 1, 2)
 
-        # Vector from p1 to points
-        w = points - p1  # (B, N, M, 2)
+        # Vector from p1 to each pixel
+        w = px - p1                # (B, M, 2)
 
-        # Project w onto v
-        c1 = (w * v).sum(dim=-1)  # (B, N, M)
-        c2 = (v * v).sum(dim=-1)  # (B, N, 1)
-
-        # Clamp to segment bounds
-        t = torch.clamp(c1 / (c2 + 1e-8), 0, 1)  # (B, N, M)
+        # Project onto segment: t = dot(w, v) / dot(v, v), clamped to [0, 1]
+        c1 = (w * v).sum(dim=-1)           # (B, M)
+        c2 = (v * v).sum(dim=-1)           # (B, 1)
+        t = torch.clamp(c1 / (c2 + 1e-8), 0.0, 1.0)  # (B, M)
 
         # Closest point on segment
-        projection = p1 + t.unsqueeze(-1) * v  # (B, N, M, 2)
+        projection = p1 + t.unsqueeze(-1) * v  # (B, M, 2)
 
-        # Distance to closest point
-        dist = torch.norm(points - projection, dim=-1)  # (B, N, M)
-
+        # Euclidean distance
+        dist = torch.norm(px - projection, dim=-1)  # (B, M)
         return dist
 
     def render_hard(
