@@ -1,0 +1,38 @@
+# Model configuration
+model:
+  backbone: 'hrnet_w32'
+  num_queries: 20
+  max_points: 50
+  d_model: 256
+  nhead: 8
+  num_decoder_layers: 6
+
+# Data configuration
+data:
+  data_root: '../data'
+  train_annotation: 'annotations_train.json'
+  val_annotation: 'annotations_val.json'
+  batch_size: 8
+  num_workers: 4
+  image_size: [480, 640]
+  max_lines: 10
+
+# Training configuration
+training:
+  max_epochs: 100
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+  lr_scheduler: 'cosine'
+
+# Loss weights
+loss:
+  weight_centerline: 5.0
+  weight_width: 1.0
+  weight_objectness: 2.0
+  weight_mask: 0.0
+
+# System
+system:
+  gpus: 1
+  precision: '32'
+  output_dir: './outputs'

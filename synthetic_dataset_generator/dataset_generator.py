@@ -3,8 +3,11 @@ Synthetic Line Plot Dataset Generator
 Generates line plots with perfect ground truth masks for instance segmentation
 """
 
+import os
 import numpy as np
 import matplotlib
+from numpy import ndarray
+
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -12,14 +15,15 @@ import cv2
 from pathlib import Path
 import json
 import random
-from typing import List, Tuple
-from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple, Optional
+from dataclasses import dataclass, asdict
 from tqdm import tqdm
 import argparse
+import yaml
 
 from equation_bank import EquationBank, Equation
-from style_bank import StyleBank, PlotStyle, LineStyle
-from SyntheticDatasetGenerator.coco_utils import COCOAnnotationBuilder, compute_area
+from style_bank import StyleBank, PlotStyle, LineStyle, LegendBank
+from coco_utils import COCOAnnotationBuilder, compute_area
 
 
 @dataclass
@@ -329,7 +333,7 @@ class LinePlotGenerator:
         x_range: Tuple[float, float] = None,
         include_markers: bool = False,
         **style_kwargs
-    ) -> GeneratedSample:
+    ) -> tuple[GeneratedSample, ndarray]:
         """
         Generate a single sample (image + masks).
         
@@ -390,6 +394,442 @@ class LinePlotGenerator:
             y_range=y_range,
             image_size=image_size
         ), image
+
+    def _extract_line_coordinates(
+            self,
+            x: np.ndarray,
+            equation: Equation,
+            plot_style: PlotStyle,
+            y_range: Tuple[float, float],
+            image_size: Tuple[int, int]
+    ) -> Dict[str, Any]:
+        """
+        Extract polyline coordinates in pixel space for a line.
+
+        Args:
+            x: x values in data space
+            equation: The equation
+            plot_style: Plot style settings
+            y_range: (y_min, y_max) axis limits
+            image_size: (width, height) in pixels
+
+        Returns:
+            Dictionary with centerline points and metadata
+        """
+        width, height = image_size
+
+        # Compute y values
+        y = equation.func(x)
+        y = np.where(np.isfinite(y), y, np.nan)
+
+        # Get axis limits
+        x_min, x_max = x.min(), x.max()
+        y_min, y_max = y_range
+
+        # Create figure with EXACT same settings to get identical transform
+        fig, ax = plt.subplots(figsize=plot_style.figsize, dpi=plot_style.dpi)
+
+        # Apply same styling as main render to get identical layout
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+        if plot_style.title:
+            ax.set_title(plot_style.title, fontsize=plot_style.title_fontsize)
+        if plot_style.xlabel:
+            ax.set_xlabel(plot_style.xlabel, fontsize=plot_style.axis_label_fontsize)
+        if plot_style.ylabel:
+            ax.set_ylabel(plot_style.ylabel, fontsize=plot_style.axis_label_fontsize)
+
+        ax.tick_params(labelsize=plot_style.tick_label_fontsize)
+
+        for spine_name, visible in plot_style.spine_visible.items():
+            ax.spines[spine_name].set_visible(visible)
+
+        if plot_style.grid:
+            ax.grid(True, alpha=plot_style.grid_alpha, linestyle=plot_style.grid_linestyle)
+
+        if plot_style.tight_layout:
+            plt.tight_layout()
+
+        # Force a draw to compute transforms
+        fig.canvas.draw()
+
+        # Get the transformation from data coordinates to pixel coordinates
+        transform = ax.transData
+
+        # Convert data points to pixel coordinates
+        centerline_pixels = []
+        valid_data_x = []
+        valid_data_y = []
+
+        for xi, yi in zip(x, y):
+            if np.isfinite(yi):
+                # Transform (x, y) data coords to display (pixel) coords
+                pixel_coords = transform.transform((xi, yi))
+                px, py = pixel_coords
+
+                # Convert to image coordinates (origin top-left)
+                # Matplotlib display coords have origin at bottom-left
+                py = fig.bbox.height - py
+
+                centerline_pixels.append([float(px), float(py)])
+                valid_data_x.append(float(xi))
+                valid_data_y.append(float(yi))
+
+        plt.close(fig)
+
+        # Simplify polyline to reduce points while preserving shape
+        if len(centerline_pixels) > 2:
+            centerline_pixels = self._simplify_polyline(centerline_pixels, tolerance=1.0)
+
+        return {
+            "centerline": centerline_pixels,
+            "num_points": len(centerline_pixels),
+            "data_x": valid_data_x,
+            "data_y": valid_data_y,
+        }
+
+    def _simplify_polyline(
+            self,
+            points: List[List[float]],
+            tolerance: float = 1.0
+    ) -> List[List[float]]:
+        """
+        Simplify polyline using Ramer-Douglas-Peucker algorithm.
+        Reduces number of points while preserving shape.
+
+        Args:
+            points: List of [x, y] coordinates
+            tolerance: Maximum distance for point removal (pixels)
+
+        Returns:
+            Simplified list of points
+        """
+        if len(points) < 3:
+            return points
+
+        points = np.array(points)
+
+        # Find point with maximum distance from line between first and last
+        first = points[0]
+        last = points[-1]
+
+        line_vec = last - first
+        line_len = np.linalg.norm(line_vec)
+
+        if line_len == 0:
+            return [points[0].tolist(), points[-1].tolist()]
+
+        line_unit = line_vec / line_len
+
+        # Compute perpendicular distances
+        max_dist = 0
+        max_idx = 0
+
+        for i in range(1, len(points) - 1):
+            vec = points[i] - first
+            proj_len = np.dot(vec, line_unit)
+            proj_len = np.clip(proj_len, 0, line_len)
+            proj_point = first + proj_len * line_unit
+            dist = np.linalg.norm(points[i] - proj_point)
+
+            if dist > max_dist:
+                max_dist = dist
+                max_idx = i
+
+        # If max distance > tolerance, recursively simplify
+        if max_dist > tolerance:
+            left = self._simplify_polyline(points[:max_idx + 1].tolist(), tolerance)
+            right = self._simplify_polyline(points[max_idx:].tolist(), tolerance)
+            return left[:-1] + right
+        else:
+            return [points[0].tolist(), points[-1].tolist()]
+
+    def generate_sample_lineformer(
+            self,
+            num_lines: int = None,
+            x_range: Tuple[float, float] = None,
+            include_markers: bool = False,
+            **style_kwargs
+    ) -> Tuple[Dict[str, Any], np.ndarray]:
+        """
+        Generate a single sample with LineFormer annotations (polylines).
+
+        Args:
+            num_lines: Number of lines (random 1-10 if None)
+            x_range: X axis range (random if None)
+            include_markers: Whether to include markers on lines
+            **style_kwargs: Passed to style sampling
+
+        Returns:
+            Tuple of (sample_data dict, image array)
+        """
+        # Determine number of lines
+        if num_lines is None:
+            num_lines = random.randint(1, 10)
+
+        # Sample x range
+        if x_range is None:
+            x_range = self._sample_x_range()
+
+        # Generate x values
+        x = np.linspace(x_range[0], x_range[1], 500)
+
+        # Sample equations
+        equations = self.equation_bank.sample_multiple_equations(
+            n=num_lines,
+            x_range=x_range,
+            ensure_diversity=True
+        )
+
+        # Compute y range
+        y_range = self._compute_y_range(equations, x)
+
+        # Sample styles
+        plot_style, line_styles = self.style_bank.sample_complete_style(
+            num_lines=num_lines,
+            include_markers=include_markers,
+            **style_kwargs
+        )
+
+        # Render main image
+        image = self._render_plot_image(x, equations, line_styles, plot_style, y_range)
+        image_size = (image.shape[1], image.shape[0])  # (width, height)
+
+        # Extract polyline coordinates for each line
+        lines_data = []
+        for i, (eq, ls) in enumerate(zip(equations, line_styles)):
+            line_info = self._extract_line_coordinates(
+                x, eq, plot_style, y_range, image_size
+            )
+
+            line_info["line_id"] = i
+            line_info["equation_type"] = eq.category
+            line_info["equation_name"] = eq.name
+            line_info["line_width_pixels"] = ls.linewidth
+            line_info["color"] = ls.color
+            line_info["linestyle"] = ls.linestyle
+
+            lines_data.append(line_info)
+
+        # Build sample data
+        sample_data = {
+            "image_size": {"width": image_size[0], "height": image_size[1]},
+            "num_lines": num_lines,
+            "x_range": list(x_range),
+            "y_range": list(y_range),
+            "lines": lines_data,
+            "plot_style": {
+                "title": plot_style.title,
+                "xlabel": plot_style.xlabel,
+                "ylabel": plot_style.ylabel,
+                "background_color": plot_style.background_color,
+            }
+        }
+
+        return sample_data, image
+
+    def generate_dataset_lineformer(
+            self,
+            output_dir: str,
+            num_samples: int,
+            split: str = "train",
+            save_debug_masks: bool = False,
+            save_metadata: bool = True,
+    ) -> str:
+        """
+        Generate a complete dataset with LineFormer annotations.
+
+        Args:
+            output_dir: Output directory
+            num_samples: Number of samples to generate
+            split: Split name (train, val, test)
+            save_debug_masks: Whether to save mask images for verification
+            save_metadata: Whether to save per-image metadata
+
+        Returns:
+            Path to annotations file
+        """
+        output_dir = Path(output_dir)
+
+        # Create directories
+        images_dir = output_dir / split / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        if save_debug_masks:
+            debug_masks_dir = output_dir / "debug_masks" / split
+            debug_masks_dir.mkdir(parents=True, exist_ok=True)
+
+        if save_metadata:
+            metadata_dir = output_dir / "metadata" / split
+            metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize annotations structure
+        annotations = {
+            "info": {
+                "description": f"Synthetic Line Plot Dataset (LineFormer format) - {split}",
+                "version": "2.0",
+                "format": "lineformer",
+            },
+            "categories": [
+                {"id": 1, "name": "line", "supercategory": "chart_element"}
+            ],
+            "images": [],
+            "annotations": [],
+        }
+
+        # Statistics
+        stats = {
+            "total_samples": num_samples,
+            "total_annotations": 0,
+            "lines_per_image": [],
+            "points_per_line": [],
+            "equation_types": {},
+        }
+
+        annotation_id = 1
+
+        print(f"\nGenerating {num_samples} LineFormer samples for {split} split...")
+
+        for i in tqdm(range(num_samples), desc=f"Generating {split}"):
+            # Set seed for this sample (reproducible)
+            if self.seed is not None:
+                sample_seed = self.seed + i
+                random.seed(sample_seed)
+                np.random.seed(sample_seed)
+
+            # Generate sample with polyline annotations
+            sample_data, image = self.generate_sample_lineformer()
+
+            # Save image
+            image_filename = f"image_{i:06d}.png"
+            image_path = images_dir / image_filename
+            cv2.imwrite(str(image_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+
+            image_id = i
+
+            # Add image entry
+            annotations["images"].append({
+                "id": image_id,
+                "file_name": image_filename,
+                "width": sample_data["image_size"]["width"],
+                "height": sample_data["image_size"]["height"],
+            })
+
+            # Add line annotations
+            for line in sample_data["lines"]:
+                centerline = line["centerline"]
+
+                # Skip empty lines
+                if len(centerline) < 2:
+                    continue
+
+                # Compute bounding box from centerline
+                xs = [p[0] for p in centerline]
+                ys = [p[1] for p in centerline]
+                bbox = [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+
+                annotations["annotations"].append({
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": 1,
+                    "centerline": centerline,
+                    "num_points": line["num_points"],
+                    "line_width": line["line_width_pixels"],
+                    "bbox": bbox,
+                    "data_coordinates": {
+                        "x": line["data_x"],
+                        "y": line["data_y"],
+                    },
+                    "metadata": {
+                        "equation_type": line["equation_type"],
+                        "equation_name": line["equation_name"],
+                        "color": line["color"],
+                        "linestyle": line["linestyle"],
+                    }
+                })
+
+                annotation_id += 1
+                stats["points_per_line"].append(line["num_points"])
+
+            # Update statistics
+            stats["total_annotations"] += len(sample_data["lines"])
+            stats["lines_per_image"].append(sample_data["num_lines"])
+
+            for line in sample_data["lines"]:
+                cat = line["equation_type"]
+                stats["equation_types"][cat] = stats["equation_types"].get(cat, 0) + 1
+
+            # Save debug masks if requested (for verification)
+            if save_debug_masks:
+                for j, line in enumerate(sample_data["lines"]):
+                    mask = self._centerline_to_mask(
+                        line["centerline"],
+                        line["line_width_pixels"],
+                        (sample_data["image_size"]["width"], sample_data["image_size"]["height"])
+                    )
+                    mask_filename = f"image_{i:06d}_mask_{j}.png"
+                    cv2.imwrite(str(debug_masks_dir / mask_filename), mask)
+
+            # Save metadata
+            if save_metadata:
+                metadata_path = metadata_dir / f"image_{i:06d}.json"
+                with open(metadata_path, 'w') as f:
+                    json.dump(sample_data, f, indent=2)
+
+        # Save annotations
+        annotations_path = output_dir / split / "annotations.json"
+        with open(annotations_path, 'w') as f:
+            json.dump(annotations, f, indent=2)
+
+        # Compute and save statistics
+        stats["avg_lines_per_image"] = float(np.mean(stats["lines_per_image"]))
+        stats["avg_points_per_line"] = float(np.mean(stats["points_per_line"])) if stats["points_per_line"] else 0
+
+        stats_path = output_dir / split / "stats.json"
+        with open(stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+
+        print(f"\nGeneration complete for {split}:")
+        print(f"  Images: {num_samples}")
+        print(f"  Annotations: {stats['total_annotations']}")
+        print(f"  Avg lines/image: {stats['avg_lines_per_image']:.2f}")
+        print(f"  Avg points/line: {stats['avg_points_per_line']:.1f}")
+
+        return str(annotations_path)
+
+    def _centerline_to_mask(
+            self,
+            centerline: List[List[float]],
+            width: float,
+            image_size: Tuple[int, int]
+    ) -> np.ndarray:
+        """
+        Render a centerline to a binary mask (for verification).
+
+        Args:
+            centerline: List of [x, y] pixel coordinates
+            width: Line width in pixels
+            image_size: (width, height)
+
+        Returns:
+            Binary mask (H, W) with values 0 or 255
+        """
+        img_w, img_h = image_size
+
+        # Create canvas
+        mask = np.zeros((img_h, img_w), dtype=np.uint8)
+
+        if len(centerline) < 2:
+            return mask
+
+        # Convert to numpy array of points
+        pts = np.array(centerline, dtype=np.int32).reshape((-1, 1, 2))
+
+        # Draw polyline
+        cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=max(1, int(width)))
+
+        return mask
     
     def generate_dataset(
         self,
@@ -548,7 +988,7 @@ def main():
                        help="Number of training samples")
     parser.add_argument("--num-val", type=int, default=200,
                        help="Number of validation samples")
-    parser.add_argument("--num-test", type=int, default=200,
+    parser.add_argument("--num-test", type=int, default=0,
                        help="Number of test samples")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed")
@@ -560,6 +1000,8 @@ def main():
                        help="Save generation metadata for each image")
     parser.add_argument("--use-rle", action="store_true",
                        help="Use RLE encoding for annotations")
+    parser.add_argument("--format", type=str, default="lineformer", choices=["coco", "lineformer"],
+                        help="Output format: 'coco' for masks, 'lineformer' for polylines")
     
     args = parser.parse_args()
     
@@ -584,17 +1026,26 @@ def main():
         ("val", args.num_val),
         ("test", args.num_test),
     ]
-    
+
     for split_name, num_samples in splits:
         if num_samples > 0:
-            generator.generate_dataset(
-                output_dir=args.output_dir,
-                num_samples=num_samples,
-                split=split_name,
-                save_debug_masks=args.save_debug_masks,
-                save_metadata=args.save_metadata,
-                use_rle=args.use_rle
-            )
+            if args.format == "lineformer":
+                generator.generate_dataset_lineformer(
+                    output_dir=args.output_dir,
+                    num_samples=num_samples,
+                    split=split_name,
+                    save_debug_masks=args.save_debug_masks,
+                    save_metadata=args.save_metadata,
+                )
+            else:
+                generator.generate_dataset(
+                    output_dir=args.output_dir,
+                    num_samples=num_samples,
+                    split=split_name,
+                    save_debug_masks=args.save_debug_masks,
+                    save_metadata=args.save_metadata,
+                    use_rle=args.use_rle
+                )
     
     print("\n" + "=" * 60)
     print("Dataset generation complete!")
