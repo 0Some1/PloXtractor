@@ -1,0 +1,6 @@
+numpy>=1.20.0
+matplotlib>=3.5.0
+opencv-python>=4.5.0
+tqdm>=4.62.0
+pycocotools>=2.0.0
+pyyaml>=5.4.0

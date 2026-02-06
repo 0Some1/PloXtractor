@@ -1,0 +1,222 @@
+# Synthetic Line Plot Dataset Configuration
+# This file defines the default parameters for dataset generation
+
+dataset:
+  name: "SyntheticLinePlots"
+  description: "Synthetic line plots for instance segmentation training"
+  version: "1.0"
+  
+  # Number of samples per split
+  num_train: 10000
+  num_val: 1000
+  num_test: 1000
+  
+  # Random seed for reproducibility
+  seed: 42
+
+# Plot configuration
+plot:
+  # Number of lines per image (uniform random)
+  num_lines:
+    min: 1
+    max: 10
+  
+  # Image dimensions (will be randomly sampled in this range)
+  figsize:  # in inches
+    width: [6, 10]
+    height: [4, 7]
+  
+  dpi: [80, 120]  # dots per inch
+  
+  # X-axis range patterns (one will be randomly selected and scaled)
+  x_range_patterns:
+    - [-10, 10]
+    - [-5, 5]
+    - [0, 10]
+    - [-6.28, 6.28]  # -2π to 2π
+    - [0, 6.28]      # 0 to 2π
+    - [-1, 1]
+    - [0, 100]
+  
+  # Probabilities for optional elements
+  include_title: 0.7
+  include_legend: 0.8
+  include_grid: 0.5
+  include_axis_labels: 0.8
+
+# Equation configuration
+equations:
+  # Sampling weights for each category
+  # Higher weight = more likely to be selected
+  weights:
+    linear: 1.0
+    polynomial: 1.5
+    trigonometric: 1.2
+    exponential: 0.8
+    logarithmic: 0.6
+    power: 0.7
+    sigmoid: 0.5
+    composite: 0.8
+    rational: 0.4
+  
+  # Ensure diversity: try to use different equation types in same plot
+  ensure_diversity: true
+  
+  # Parameter ranges for each equation type
+  # (These are used within the equation_bank.py)
+  
+  linear:
+    slope: [-3, 3]
+    intercept: [-5, 5]
+  
+  polynomial:
+    degree: [2, 4]
+    coefficient_scale: [-2, 2]
+  
+  trigonometric:
+    amplitude: [0.5, 3.0]
+    frequency: [0.5, 3.0]
+    phase: [0, 6.28]
+    vertical_shift: [-2, 2]
+  
+  exponential:
+    scale: [0.5, 2.0]
+    rate: [0.1, 0.5]
+    shift: [-2, 2]
+  
+  sigmoid:
+    max_value: [1, 5]
+    steepness: [0.5, 3]
+    shift: [-2, 2]
+
+# Style configuration
+styles:
+  # Color palettes
+  color_palettes:
+    standard:
+      - '#1f77b4'
+      - '#ff7f0e'
+      - '#2ca02c'
+      - '#d62728'
+      - '#9467bd'
+      - '#8c564b'
+      - '#e377c2'
+      - '#7f7f7f'
+      - '#bcbd22'
+      - '#17becf'
+    
+    vibrant:
+      - '#e41a1c'
+      - '#377eb8'
+      - '#4daf4a'
+      - '#984ea3'
+      - '#ff7f00'
+      - '#ffff33'
+      - '#a65628'
+      - '#f781bf'
+    
+    pastel:
+      - '#b3e2cd'
+      - '#fdcdac'
+      - '#cbd5e8'
+      - '#f4cae4'
+      - '#e6f5c9'
+      - '#fff2ae'
+    
+    dark:
+      - '#1b9e77'
+      - '#d95f02'
+      - '#7570b3'
+      - '#e7298a'
+      - '#66a61e'
+      - '#e6ab02'
+  
+  # Line styles
+  line_styles:
+    options: ['-', '--', '-.', ':']
+    weights: [0.7, 0.15, 0.1, 0.05]  # Favor solid lines
+  
+  # Line widths
+  line_width:
+    min: 1.5
+    max: 3.0
+  
+  # Markers (not included in masks per user specification)
+  markers:
+    enabled: false
+    options: ['o', 's', '^', 'v', 'D', 'p', '*']
+    probability: 0.3
+  
+  # Background
+  backgrounds:
+    - 'white'
+    - '#f8f8f8'
+    - '#f0f0f0'
+    - '#fafafa'
+  
+  # Grid styles
+  grid:
+    styles: ['-', '--', ':', '-.']
+    alpha: [0.3, 0.7]
+  
+  # Font sizes
+  fonts:
+    title: [12, 18]
+    axis_label: [10, 14]
+    tick_label: [8, 12]
+
+# Mask generation configuration
+mask:
+  # Line thickness in pixels for ground truth masks
+  line_thickness: 3
+  
+  # Threshold for binarizing anti-aliased lines
+  # 0.5 = 50% (as specified by user for color bleeding)
+  threshold: 0.5
+  
+  # Optional dilation of masks (set to 0 for no dilation)
+  dilation: 0
+
+# Output configuration
+output:
+  # Use RLE encoding instead of polygon (False = polygon)
+  use_rle: false
+  
+  # Save individual mask images for debugging
+  save_debug_masks: false
+  
+  # Save generation metadata for each image
+  save_metadata: true
+  
+  # Annotation format
+  annotation_format: "coco"  # Only COCO supported currently
+
+# Legend/Label bank
+labels:
+  # Categories for line labels
+  categories:
+    - scientific
+    - business
+    - generic
+    - math
+  
+  # Example labels (full lists are in style_bank.py)
+  scientific:
+    - "Temperature (°C)"
+    - "Pressure (Pa)"
+    - "Velocity (m/s)"
+  
+  business:
+    - "Revenue ($)"
+    - "Profit ($)"
+    - "Growth Rate (%)"
+  
+  generic:
+    - "Series A"
+    - "Series B"
+    - "Line 1"
+  
+  math:
+    - "f(x)"
+    - "g(x)"
+    - "y₁"
