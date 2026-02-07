@@ -12,8 +12,7 @@ Usage:
                         --input image.png --output-dir ./results
 
     # Batch (directory of images)
-    python inference.py --model ./outputs/checkpoints/best.pth \
-                        --input ./test_images/ --output-dir ./results
+    python inference.py --model ./outputs/checkpoints/last.ckpt --input ../data/val --output-dir ./results
 
     # Masks only
     python inference.py --model ./outputs/checkpoints/best.pth \
