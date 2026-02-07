@@ -47,23 +47,29 @@ class PretrainedHRNetBackbone(nn.Module):
             features_only=True,
         )
 
-        # timm HRNet with features_only returns a list of feature maps.
-        # Inspect the channel counts from the model's feature_info.
-        feature_info = self.hrnet.feature_info.channels()
+        # timm HRNet with features_only returns features at strides [2, 4, 8, 16, 32].
+        # We target stride 4 (1/4 resolution) as our output. Find which index that is,
+        # and only fuse features from stride >= 4 (skip the stride-2 stem feature).
+        feature_channels = self.hrnet.feature_info.channels()
+        feature_strides = self.hrnet.feature_info.reduction()
 
-        # HRNet features_only typically returns features at multiple scales.
-        # We take the highest-resolution feature (index 0, stride 4) and
-        # optionally fuse lower-resolution features into it.
-        self._feature_channels = feature_info
+        # Find features at stride >= 4 to fuse (skip stride-2 stem)
+        self._fuse_indices = [i for i, s in enumerate(feature_strides) if s >= 4]
+        assert len(self._fuse_indices) > 0, "No features at stride >= 4 found"
 
-        # Fusion: project each resolution branch and upsample to 1/4 resolution
-        self.upsample_layers = nn.ModuleList()
-        for i, ch in enumerate(feature_info):
+        # The target resolution is stride 4 (the smallest stride we keep)
+        self._target_idx = self._fuse_indices[0]
+        self._target_stride = feature_strides[self._target_idx]
+
+        # Fusion: project each kept branch and upsample to stride-4 resolution
+        self.upsample_layers = nn.ModuleDict()
+        for i in self._fuse_indices:
+            ch = feature_channels[i]
             layers = [
                 nn.Conv2d(ch, output_channels, kernel_size=1, bias=False),
                 nn.BatchNorm2d(output_channels),
             ]
-            self.upsample_layers.append(nn.Sequential(*layers))
+            self.upsample_layers[str(i)] = nn.Sequential(*layers)
 
         # Final 3x3 conv after fusion
         self.fusion_conv = nn.Sequential(
@@ -83,13 +89,13 @@ class PretrainedHRNetBackbone(nn.Module):
         # Extract multi-scale features
         feature_maps = self.hrnet(x)  # list of tensors at different scales
 
-        # Target spatial size: the highest-resolution feature map (1/4)
-        target_h, target_w = feature_maps[0].shape[2:]
+        # Target spatial size: stride-4 feature map (H/4, W/4)
+        target_h, target_w = feature_maps[self._target_idx].shape[2:]
 
-        # Project each scale and upsample to target resolution, then sum
+        # Project each kept scale and upsample to stride-4 resolution, then sum
         fused = None
-        for i, feat in enumerate(feature_maps):
-            projected = self.upsample_layers[i](feat)
+        for i in self._fuse_indices:
+            projected = self.upsample_layers[str(i)](feature_maps[i])
             if projected.shape[2:] != (target_h, target_w):
                 projected = F.interpolate(
                     projected,
