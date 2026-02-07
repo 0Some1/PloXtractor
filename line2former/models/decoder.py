@@ -1,6 +1,10 @@
 """
 Line Query Decoder
 Transformer-based decoder that uses learnable line queries to extract line instances.
+
+Follows the DETR pattern: query positional embeddings are injected at every
+decoder layer (added to Q in self-attention and cross-attention), not just used
+to initialize the queries.
 """
 
 import torch
@@ -14,6 +18,10 @@ class LineQueryDecoder(nn.Module):
     """
     Transformer decoder with learnable line queries.
     Each query represents one line instance.
+
+    DETR-style position injection:
+      - query_embed provides a *positional* component added to Q/K in every layer
+      - query content is initialized to zeros and accumulates information via attention
     """
 
     def __init__(
@@ -43,7 +51,7 @@ class LineQueryDecoder(nn.Module):
         self.num_heads = num_heads
         self.max_points = max_points
 
-        # Learnable line queries
+        # Learnable query positional embeddings — injected at every layer
         self.query_embed = nn.Embedding(num_queries, d_model)
 
         # Transformer decoder layers
@@ -78,34 +86,45 @@ class LineQueryDecoder(nn.Module):
         # Flatten spatial dimensions: (B, C, H, W) -> (H*W, B, C)
         features_flat = features.flatten(2).permute(2, 0, 1)  # (H*W, B, C)
 
-        # Positional embeddings
+        # Positional embeddings for spatial features
         if pos_embed is not None:
             pos_embed_flat = pos_embed.flatten(2).permute(2, 0, 1)  # (H*W, B, C)
         else:
             pos_embed_flat = None
 
-        # Initialize queries: (num_queries, B, d_model)
-        queries = self.query_embed.weight.unsqueeze(1).repeat(1, B, 1)
+        # Query positional embeddings: (num_queries, 1, d_model) -> (num_queries, B, d_model)
+        query_pos = self.query_embed.weight.unsqueeze(1).expand(-1, B, -1)
 
-        # Apply decoder layers
+        # Initialize query content to zeros (DETR pattern).
+        # The content is built up through cross-attention layers.
+        tgt = torch.zeros_like(query_pos)
+
+        # Apply decoder layers — inject query_pos at every layer
         for layer in self.decoder_layers:
-            queries = layer(
-                tgt=queries,
+            tgt = layer(
+                tgt=tgt,
                 memory=features_flat,
-                pos=pos_embed_flat,
+                query_pos=query_pos,
+                memory_pos=pos_embed_flat,
             )
 
         # Final normalization
-        queries = self.norm(queries)
+        tgt = self.norm(tgt)
 
         # Permute to (B, num_queries, d_model)
-        queries = queries.permute(1, 0, 2)
+        tgt = tgt.permute(1, 0, 2)
 
-        return queries
+        return tgt
 
 
 class TransformerDecoderLayer(nn.Module):
-    """Single transformer decoder layer with self-attention and cross-attention."""
+    """
+    Single transformer decoder layer with self-attention and cross-attention.
+
+    DETR-style position injection:
+      - Self-attention:  Q = tgt + query_pos,  K = tgt + query_pos,  V = tgt
+      - Cross-attention: Q = tgt + query_pos,  K = memory + memory_pos, V = memory
+    """
 
     def __init__(
             self,
@@ -153,33 +172,35 @@ class TransformerDecoderLayer(nn.Module):
             self,
             tgt: torch.Tensor,
             memory: torch.Tensor,
-            pos: Optional[torch.Tensor] = None,
+            query_pos: Optional[torch.Tensor] = None,
+            memory_pos: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
-            tgt: (num_queries, B, d_model) target queries
+            tgt: (num_queries, B, d_model) target query content
             memory: (H*W, B, d_model) encoder features
-            pos: (H*W, B, d_model) positional embeddings
+            query_pos: (num_queries, B, d_model) query positional embeddings
+            memory_pos: (H*W, B, d_model) spatial positional embeddings
 
         Returns:
-            tgt: (num_queries, B, d_model) updated queries
+            tgt: (num_queries, B, d_model) updated query content
         """
-        # Self-attention
-        tgt2 = self.self_attn(tgt, tgt, tgt)[0]
+        # --- Self-attention: queries attend to each other ---
+        # Q and K get positional info so attention knows *which* query is which
+        q = k = tgt if query_pos is None else tgt + query_pos
+        tgt2 = self.self_attn(q, k, value=tgt)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
-        # Cross-attention
-        if pos is not None:
-            memory_with_pos = memory + pos
-        else:
-            memory_with_pos = memory
-
-        tgt2 = self.cross_attn(tgt, memory_with_pos, memory)[0]
+        # --- Cross-attention: queries attend to image features ---
+        # Q gets query position, K gets spatial position, V is raw features
+        q = tgt if query_pos is None else tgt + query_pos
+        k = memory if memory_pos is None else memory + memory_pos
+        tgt2 = self.cross_attn(q, k, value=memory)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
-        # Feedforward
+        # --- Feedforward ---
         tgt2 = self.ffn(tgt)
         tgt = tgt + tgt2
         tgt = self.norm3(tgt)
@@ -232,8 +253,6 @@ class PositionalEncoding2D(nn.Module):
         pe_x[:, 1::2] = torch.cos(pos_x)
 
         # Expand to 2D
-        # pe_y: (max_h, 1, d_model_half) -> (max_h, max_w, d_model_half)
-        # pe_x: (1, max_w, d_model_half) -> (max_h, max_w, d_model_half)
         pe_y = pe_y.unsqueeze(1).expand(max_h, max_w, d_model_half)
         pe_x = pe_x.unsqueeze(0).expand(max_h, max_w, d_model_half)
 

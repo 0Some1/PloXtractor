@@ -276,8 +276,9 @@ def main():
                         help='Validation annotation file')
 
     # Model arguments
-    parser.add_argument('--backbone', type=str, default='hrnet',
-                        choices=['hrnet', 'resnet50', 'custom_cnn'])
+    parser.add_argument('--backbone', type=str, default='hrnet_w32',
+                        choices=['hrnet_w18', 'hrnet_w32', 'hrnet_w48',
+                                 'dilated_resnet50', 'hrnet', 'lightweight'])
     parser.add_argument('--num_queries', type=int, default=20)
     parser.add_argument('--max_points', type=int, default=50)
     parser.add_argument('--d_model', type=int, default=256)
@@ -285,11 +286,11 @@ def main():
     parser.add_argument('--num_decoder_layers', type=int, default=6)
 
     # Training arguments
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=2)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--max_epochs', type=int, default=100)
+    parser.add_argument('--max_epochs', type=int, default=10)
     parser.add_argument('--lr_scheduler', type=str, default='cosine',
                         choices=['cosine', 'step', 'plateau'])
 
