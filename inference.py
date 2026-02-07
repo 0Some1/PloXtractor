@@ -227,9 +227,16 @@ def load_model(
         for k, v in ckpt['state_dict'].items():
             new_key = k.replace('model.', '', 1) if k.startswith('model.') else k
             state_dict[new_key] = v
-        model.load_state_dict(state_dict, strict=False)
     else:
-        model.load_state_dict(ckpt, strict=False)
+        state_dict = ckpt
+
+    # Drop keys whose shapes don't match (e.g. renderer buffers from old code)
+    model_sd = model.state_dict()
+    filtered = {
+        k: v for k, v in state_dict.items()
+        if k in model_sd and v.shape == model_sd[k].shape
+    }
+    model.load_state_dict(filtered, strict=False)
 
     model.to(device).eval()
     return model
