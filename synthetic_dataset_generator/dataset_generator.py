@@ -536,10 +536,11 @@ class LinePlotGenerator:
 
             if texture_type == 'gradient':
                 # Subtle gradient overlay
-                grad = np.linspace(0, random.uniform(5, 20), h).reshape(-1, 1)
-                grad = np.broadcast_to(grad, (h, w))
                 if random.random() < 0.5:
-                    grad = grad.T[:h, :w]  # horizontal gradient
+                    grad = np.linspace(0, random.uniform(5, 20), w).reshape(1, -1)
+                else:
+                    grad = np.linspace(0, random.uniform(5, 20), h).reshape(-1, 1)
+                grad = np.broadcast_to(grad, (h, w))
                 grad_rgb = np.stack([grad] * 3, axis=-1)
                 image = np.clip(image.astype(np.float32) + grad_rgb, 0, 255).astype(np.uint8)
 
