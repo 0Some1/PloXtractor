@@ -22,7 +22,7 @@ import argparse
 import yaml
 
 from equation_bank import EquationBank, Equation
-from style_bank import StyleBank, PlotStyle, LineStyle, LegendBank
+from style_bank import StyleBank, PlotStyle, LineStyle, LegendBank, AnnotationBank
 from coco_utils import COCOAnnotationBuilder, compute_area
 
 
@@ -49,23 +49,52 @@ class LinePlotGenerator:
         seed: int = None,
         mask_line_thickness: int = 3,
         mask_threshold: float = 0.5,  # 50% for color bleeding
+        enable_noise: bool = True,
     ):
         """
         Initialize the generator.
-        
+
         Args:
             seed: Random seed for reproducibility
             mask_line_thickness: Thickness of lines in mask (pixels)
             mask_threshold: Threshold for binarizing anti-aliased lines (0.5 = 50%)
+            enable_noise: Whether to enable visual noise and annotations
         """
         self.seed = seed
         self.mask_line_thickness = mask_line_thickness
         self.mask_threshold = mask_threshold
-        
+        self.enable_noise = enable_noise
+
         # Initialize banks
         self.equation_bank = EquationBank(seed=seed)
         self.style_bank = StyleBank(seed=seed)
-        
+        self.annotation_bank = AnnotationBank(seed=seed)
+
+        # Noise probabilities (matplotlib-level annotations)
+        self.annotation_probs = {
+            'text_annotation': 0.30,
+            'reference_lines': 0.25,
+            'shaded_region': 0.20,
+            'data_callout': 0.15,
+            'error_bars': 0.15,
+            'scatter_overlay': 0.20,
+            'textbox': 0.25,
+            'secondary_yaxis': 0.10,
+            'inset_axes': 0.10,
+        }
+
+        # Post-rendering noise probabilities
+        self.image_noise_probs = {
+            'jpeg_artifacts': 0.30,
+            'gaussian_blur': 0.15,
+            'salt_pepper': 0.10,
+            'brightness_contrast': 0.25,
+            'background_texture': 0.15,
+            'watermark': 0.10,
+            'border_padding': 0.20,
+            'resolution_degrade': 0.15,
+        }
+
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
@@ -203,23 +232,384 @@ class LinePlotGenerator:
         # Legend
         if plot_style.show_legend and any(ls.label for ls in line_styles):
             ax.legend(loc=plot_style.legend_loc)
-        
+
+        # Add visual noise annotations (before tight_layout for proper positioning)
+        if self.enable_noise:
+            self._add_plot_annotations(ax, fig, x, equations, line_styles, y_range)
+
         if plot_style.tight_layout:
             plt.tight_layout()
-        
+
         # Render to numpy array
         canvas = FigureCanvasAgg(fig)
         canvas.draw()
-        
+
         # Get RGB array
         buf = canvas.buffer_rgba()
         image = np.asarray(buf)
         image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
-        
+
         plt.close(fig)
-        
+
+        # Apply post-rendering image noise
+        if self.enable_noise:
+            image = self._apply_image_noise(image)
+
         return image
     
+    def _add_plot_annotations(
+        self,
+        ax: plt.Axes,
+        fig: plt.Figure,
+        x: np.ndarray,
+        equations: List[Equation],
+        line_styles: List[LineStyle],
+        y_range: Tuple[float, float],
+    ):
+        """
+        Add random visual annotations to a plot (text, arrows, shaded regions, etc.).
+        These are noise elements that make the generated images more realistic.
+        Applied BEFORE rasterization so they appear naturally in the matplotlib render.
+
+        Args:
+            ax: Matplotlib axes to annotate
+            fig: Matplotlib figure
+            x: x values array
+            equations: List of plotted equations
+            line_styles: List of line styles used
+            y_range: (y_min, y_max) axis limits
+        """
+        y_min, y_max = y_range
+        x_min, x_max = x.min(), x.max()
+
+        # Text annotation with arrow pointing to a random point on a line
+        if random.random() < self.annotation_probs['text_annotation']:
+            eq = random.choice(equations)
+            try:
+                y_vals = eq.func(x)
+                valid = np.isfinite(y_vals)
+                if valid.sum() > 0:
+                    idx = random.choice(np.where(valid)[0])
+                    px, py = x[idx], y_vals[idx]
+                    text = self.annotation_bank.sample_callout(px, py)
+                    # Offset for annotation text
+                    offset_x = random.uniform(-40, 40)
+                    offset_y = random.uniform(-40, 40)
+                    ax.annotate(
+                        text, xy=(px, py),
+                        xytext=(offset_x, offset_y), textcoords='offset points',
+                        arrowprops=dict(
+                            arrowstyle=random.choice(['->', '-|>', 'fancy', 'simple']),
+                            color=random.choice(['black', 'gray', 'red', '#555555']),
+                            lw=random.uniform(0.5, 1.5),
+                        ),
+                        fontsize=random.randint(7, 11),
+                        color=random.choice(['black', '#333333', '#666666']),
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='wheat', alpha=random.uniform(0.3, 0.8))
+                        if random.random() < 0.5 else None,
+                    )
+            except Exception:
+                pass
+
+        # Horizontal / vertical reference lines
+        if random.random() < self.annotation_probs['reference_lines']:
+            num_refs = random.randint(1, 3)
+            for _ in range(num_refs):
+                label = self.annotation_bank.sample_reference_label()
+                ref_color = random.choice(['gray', 'red', 'blue', '#888888', '#cc0000'])
+                ref_ls = random.choice(['--', ':', '-.'])
+                ref_alpha = random.uniform(0.3, 0.7)
+                if random.random() < 0.7:
+                    # Horizontal
+                    yval = random.uniform(y_min, y_max)
+                    ax.axhline(y=yval, color=ref_color, linestyle=ref_ls,
+                               alpha=ref_alpha, linewidth=random.uniform(0.5, 1.5),
+                               label=label if random.random() < 0.3 else None)
+                    if random.random() < 0.5:
+                        ax.text(x_max, yval, f' {label}', fontsize=random.randint(6, 9),
+                                va='bottom', ha='right', color=ref_color, alpha=ref_alpha + 0.2)
+                else:
+                    # Vertical
+                    xval = random.uniform(x_min, x_max)
+                    ax.axvline(x=xval, color=ref_color, linestyle=ref_ls,
+                               alpha=ref_alpha, linewidth=random.uniform(0.5, 1.5))
+                    if random.random() < 0.5:
+                        ax.text(xval, y_max, f' {label}', fontsize=random.randint(6, 9),
+                                va='top', rotation=90, color=ref_color, alpha=ref_alpha + 0.2)
+
+        # Shaded region (fill_between or axvspan)
+        if random.random() < self.annotation_probs['shaded_region']:
+            eq = random.choice(equations)
+            try:
+                y_vals = eq.func(x)
+                valid = np.isfinite(y_vals)
+                if valid.sum() > 10:
+                    shade_color = random.choice(['blue', 'gray', 'green', 'red', 'orange'])
+                    shade_alpha = random.uniform(0.05, 0.2)
+
+                    if random.random() < 0.6:
+                        # Confidence band around a line
+                        band_width = random.uniform(0.1, 0.5) * (y_max - y_min) * 0.1
+                        y_upper = np.where(valid, y_vals + band_width, np.nan)
+                        y_lower = np.where(valid, y_vals - band_width, np.nan)
+                        ax.fill_between(x, y_lower, y_upper, alpha=shade_alpha,
+                                        color=shade_color, label=self.annotation_bank.sample_shaded_label()
+                                        if random.random() < 0.3 else None)
+                    else:
+                        # Vertical span
+                        span_start = random.uniform(x_min, (x_min + x_max) / 2)
+                        span_end = random.uniform(span_start, x_max)
+                        ax.axvspan(span_start, span_end, alpha=shade_alpha, color=shade_color)
+            except Exception:
+                pass
+
+        # Data point callout (annotate specific x,y value)
+        if random.random() < self.annotation_probs['data_callout']:
+            eq = random.choice(equations)
+            try:
+                y_vals = eq.func(x)
+                valid = np.isfinite(y_vals)
+                if valid.sum() > 0:
+                    idx = random.choice(np.where(valid)[0])
+                    px, py = x[idx], y_vals[idx]
+                    ax.plot(px, py, 'o', color='red', markersize=random.uniform(4, 8), zorder=10)
+                    ax.annotate(f'({px:.1f}, {py:.1f})', xy=(px, py),
+                                xytext=(10, 10), textcoords='offset points',
+                                fontsize=random.randint(6, 9),
+                                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+            except Exception:
+                pass
+
+        # Error bars on sampled points
+        if random.random() < self.annotation_probs['error_bars']:
+            eq = random.choice(equations)
+            ls = random.choice(line_styles)
+            try:
+                y_vals = eq.func(x)
+                valid = np.isfinite(y_vals)
+                if valid.sum() > 10:
+                    # Sample subset of points
+                    valid_idx = np.where(valid)[0]
+                    n_bars = min(random.randint(5, 15), len(valid_idx))
+                    bar_idx = np.sort(np.random.choice(valid_idx, n_bars, replace=False))
+                    err = np.random.uniform(0.05, 0.3, n_bars) * (y_max - y_min) * 0.1
+                    ax.errorbar(x[bar_idx], y_vals[bar_idx], yerr=err,
+                                fmt='none', ecolor=ls.color, alpha=0.5,
+                                capsize=random.uniform(1, 3))
+            except Exception:
+                pass
+
+        # Scatter overlay (noisy data points around a line)
+        if random.random() < self.annotation_probs['scatter_overlay']:
+            eq = random.choice(equations)
+            ls = random.choice(line_styles)
+            try:
+                y_vals = eq.func(x)
+                valid = np.isfinite(y_vals)
+                if valid.sum() > 20:
+                    valid_idx = np.where(valid)[0]
+                    n_scatter = random.randint(15, 50)
+                    scatter_idx = np.random.choice(valid_idx, min(n_scatter, len(valid_idx)), replace=False)
+                    noise_scale = random.uniform(0.02, 0.15) * (y_max - y_min)
+                    scatter_y = y_vals[scatter_idx] + np.random.normal(0, noise_scale, len(scatter_idx))
+                    ax.scatter(x[scatter_idx], scatter_y,
+                               s=random.uniform(5, 20),
+                               alpha=random.uniform(0.2, 0.6),
+                               color=ls.color, marker=random.choice(['o', 's', '^', 'x', '+']),
+                               zorder=1)
+            except Exception:
+                pass
+
+        # Text box with statistics or equation info
+        if random.random() < self.annotation_probs['textbox']:
+            text = self.annotation_bank.sample_textbox()
+            # Position in axes coordinates
+            tx = random.uniform(0.05, 0.95)
+            ty = random.uniform(0.05, 0.95)
+            ax.text(tx, ty, text, transform=ax.transAxes,
+                    fontsize=random.randint(7, 11),
+                    verticalalignment=random.choice(['top', 'bottom']),
+                    bbox=dict(boxstyle='round', facecolor=random.choice(['wheat', 'lightblue', 'lightyellow', 'white']),
+                              alpha=random.uniform(0.4, 0.9),
+                              edgecolor=random.choice(['black', 'gray', 'none'])))
+
+        # Secondary y-axis
+        if random.random() < self.annotation_probs['secondary_yaxis']:
+            try:
+                ax2 = ax.twinx()
+                # Generate a simple secondary line
+                a = random.uniform(0.2, 2)
+                b = random.uniform(-3, 3)
+                y2 = a * np.sin(random.uniform(0.5, 2) * x) + b
+                sec_color = random.choice(['#e41a1c', '#984ea3', '#ff7f00', '#a65628'])
+                ax2.plot(x, y2, color=sec_color, linestyle='--', alpha=0.6, linewidth=1.5)
+                ax2.set_ylabel(random.choice(['Secondary', 'Rate', 'Normalized', 'Ratio']),
+                               color=sec_color, fontsize=random.randint(8, 12))
+                ax2.tick_params(axis='y', labelcolor=sec_color, labelsize=random.randint(7, 10))
+            except Exception:
+                pass
+
+        # Inset axes (zoomed region)
+        if random.random() < self.annotation_probs['inset_axes']:
+            try:
+                # Position: random corner
+                positions = [
+                    [0.55, 0.55, 0.4, 0.4],  # upper right
+                    [0.05, 0.55, 0.4, 0.4],  # upper left
+                    [0.55, 0.05, 0.4, 0.4],  # lower right
+                    [0.05, 0.05, 0.4, 0.4],  # lower left
+                ]
+                pos = random.choice(positions)
+                inset = ax.inset_axes(pos)
+
+                # Zoom into a random x subrange
+                zoom_center = random.uniform(x_min + 0.2 * (x_max - x_min), x_max - 0.2 * (x_max - x_min))
+                zoom_width = (x_max - x_min) * random.uniform(0.1, 0.3)
+                zoom_x = np.linspace(zoom_center - zoom_width / 2, zoom_center + zoom_width / 2, 100)
+
+                for eq, ls in zip(equations, line_styles):
+                    try:
+                        zy = eq.func(zoom_x)
+                        zy = np.where(np.isfinite(zy), zy, np.nan)
+                        inset.plot(zoom_x, zy, color=ls.color, linewidth=1)
+                    except Exception:
+                        pass
+
+                inset.set_xlim(zoom_center - zoom_width / 2, zoom_center + zoom_width / 2)
+                inset.tick_params(labelsize=6)
+                inset.set_title('zoom', fontsize=7)
+                # Draw rectangle on main axes to indicate zoomed region
+                ax.indicate_inset_zoom(inset, edgecolor='gray', alpha=0.5)
+            except Exception:
+                pass
+
+    def _apply_image_noise(self, image: np.ndarray) -> np.ndarray:
+        """
+        Apply post-rendering noise to make images more realistic.
+        Applied AFTER matplotlib rasterization on the raw numpy array.
+        Masks are not affected since they are extracted separately.
+
+        Args:
+            image: RGB image (H, W, 3) uint8
+
+        Returns:
+            Noisy image (H, W, 3) uint8
+        """
+        h, w = image.shape[:2]
+
+        # JPEG compression artifacts
+        if random.random() < self.image_noise_probs['jpeg_artifacts']:
+            quality = random.randint(30, 70)
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            # Encode to BGR for cv2
+            bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            _, encoded = cv2.imencode('.jpg', bgr, encode_param)
+            bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+        # Gaussian blur
+        if random.random() < self.image_noise_probs['gaussian_blur']:
+            ksize = random.choice([1, 3])
+            if ksize > 0:
+                image = cv2.GaussianBlur(image, (ksize, ksize), 0)
+
+        # Salt and pepper noise
+        if random.random() < self.image_noise_probs['salt_pepper']:
+            noise_ratio = random.uniform(0.001, 0.01)
+            num_pixels = int(h * w * noise_ratio)
+            # Salt
+            coords = (np.random.randint(0, h, num_pixels), np.random.randint(0, w, num_pixels))
+            image[coords] = 255
+            # Pepper
+            coords = (np.random.randint(0, h, num_pixels), np.random.randint(0, w, num_pixels))
+            image[coords] = 0
+
+        # Brightness and contrast jitter
+        if random.random() < self.image_noise_probs['brightness_contrast']:
+            alpha = random.uniform(0.85, 1.15)  # contrast
+            beta = random.randint(-15, 15)  # brightness
+            image = np.clip(alpha * image.astype(np.float32) + beta, 0, 255).astype(np.uint8)
+
+        # Background texture (blend subtle noise pattern)
+        if random.random() < self.image_noise_probs['background_texture']:
+            texture_type = random.choice(['gradient', 'perlin_approx', 'paper'])
+
+            if texture_type == 'gradient':
+                # Subtle gradient overlay
+                if random.random() < 0.5:
+                    grad = np.linspace(0, random.uniform(5, 20), w).reshape(1, -1)
+                else:
+                    grad = np.linspace(0, random.uniform(5, 20), h).reshape(-1, 1)
+                grad = np.broadcast_to(grad, (h, w))
+                grad_rgb = np.stack([grad] * 3, axis=-1)
+                image = np.clip(image.astype(np.float32) + grad_rgb, 0, 255).astype(np.uint8)
+
+            elif texture_type == 'paper':
+                # Simulate paper texture with low-frequency noise
+                noise = np.random.normal(0, random.uniform(1, 4), (h // 4, w // 4))
+                noise = cv2.resize(noise.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+                noise_rgb = np.stack([noise] * 3, axis=-1)
+                image = np.clip(image.astype(np.float32) + noise_rgb, 0, 255).astype(np.uint8)
+
+            else:  # perlin_approx - multi-scale noise
+                noise = np.zeros((h, w), dtype=np.float32)
+                for scale in [8, 16, 32]:
+                    small = np.random.normal(0, 1, (h // scale + 1, w // scale + 1)).astype(np.float32)
+                    upscaled = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+                    noise += upscaled * (random.uniform(0.5, 2) / scale * 4)
+                noise_rgb = np.stack([noise] * 3, axis=-1)
+                image = np.clip(image.astype(np.float32) + noise_rgb, 0, 255).astype(np.uint8)
+
+        # Watermark text overlay
+        if random.random() < self.image_noise_probs['watermark']:
+            watermark_text = self.annotation_bank.sample_watermark()
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = random.uniform(1.0, 3.0)
+            thickness = random.randint(1, 3)
+            alpha_wm = random.uniform(0.05, 0.2)
+
+            text_size = cv2.getTextSize(watermark_text, font, font_scale, thickness)[0]
+            tx = (w - text_size[0]) // 2
+            ty = (h + text_size[1]) // 2
+
+            overlay = image.copy()
+            color = random.choice([(128, 128, 128), (200, 200, 200), (100, 100, 100)])
+            cv2.putText(overlay, watermark_text, (tx, ty), font, font_scale, color, thickness)
+
+            # Optionally rotate
+            if random.random() < 0.5:
+                angle = random.uniform(-30, 30)
+                M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1)
+                overlay = cv2.warpAffine(overlay, M, (w, h), borderValue=(255, 255, 255))
+                # Re-blend only non-white regions of the rotated overlay
+                mask_wm = np.any(overlay != image, axis=-1).astype(np.float32)
+                mask_wm = mask_wm[:, :, np.newaxis]
+                image = (image.astype(np.float32) * (1 - alpha_wm * mask_wm) +
+                         overlay.astype(np.float32) * alpha_wm * mask_wm).astype(np.uint8)
+            else:
+                image = cv2.addWeighted(image, 1 - alpha_wm, overlay, alpha_wm, 0)
+
+        # Random border / padding
+        if random.random() < self.image_noise_probs['border_padding']:
+            border_size = random.randint(2, 15)
+            border_color = random.choice([(255, 255, 255), (0, 0, 0), (200, 200, 200), (240, 240, 240)])
+            image = cv2.copyMakeBorder(image, border_size, border_size, border_size, border_size,
+                                       cv2.BORDER_CONSTANT, value=border_color)
+            # Resize back to original size
+            image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        # Resolution degradation (downscale then upscale)
+        if random.random() < self.image_noise_probs['resolution_degrade']:
+            scale_factor = random.uniform(0.4, 0.75)
+            small_h, small_w = int(h * scale_factor), int(w * scale_factor)
+            if small_h > 10 and small_w > 10:
+                small = cv2.resize(image, (small_w, small_h), interpolation=cv2.INTER_AREA)
+                image = cv2.resize(small, (w, h), interpolation=random.choice([
+                    cv2.INTER_LINEAR, cv2.INTER_NEAREST, cv2.INTER_CUBIC
+                ]))
+
+        return image
+
     def _render_line_mask(
         self,
         x: np.ndarray,
@@ -1002,6 +1392,8 @@ def main():
                        help="Use RLE encoding for annotations")
     parser.add_argument("--format", type=str, default="lineformer", choices=["coco", "lineformer"],
                         help="Output format: 'coco' for masks, 'lineformer' for polylines")
+    parser.add_argument("--no-noise", action="store_true",
+                        help="Disable visual noise and annotations")
     
     args = parser.parse_args()
     
@@ -1009,7 +1401,8 @@ def main():
     generator = LinePlotGenerator(
         seed=args.seed,
         mask_line_thickness=args.mask_thickness,
-        mask_threshold=0.5  # 50% as specified
+        mask_threshold=0.5,  # 50% as specified
+        enable_noise=not args.no_noise,
     )
     
     print("=" * 60)

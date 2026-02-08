@@ -58,6 +58,14 @@ equations:
     sigmoid: 0.5
     composite: 0.8
     rational: 0.4
+    piecewise: 0.9
+    gaussian: 0.8
+    absolute_value: 0.6
+    logistic_growth: 0.5
+    fourier: 0.7
+    spline_noise: 0.8
+    sqrt_cbrt: 0.5
+    reciprocal_trig: 0.3
   
   # Ensure diversity: try to use different equation types in same plot
   ensure_diversity: true
@@ -88,6 +96,36 @@ equations:
     max_value: [1, 5]
     steepness: [0.5, 3]
     shift: [-2, 2]
+
+  piecewise:
+    amplitude: [0.5, 3.0]
+    period: [1.0, 4.0]
+
+  gaussian:
+    amplitude: [1, 5]
+    sigma_fraction: [0.05, 0.3]  # fraction of x_range
+
+  absolute_value:
+    scale: [0.5, 3.0]
+
+  logistic_growth:
+    carrying_capacity: [2, 10]
+    growth_rate: [0.3, 2.0]
+
+  fourier:
+    num_harmonics: [2, 4]
+    base_frequency: [0.5, 2.0]
+
+  spline_noise:
+    num_knots: [5, 15]
+    amplitude: [1, 5]
+
+  sqrt_cbrt:
+    scale: [0.5, 3.0]
+
+  reciprocal_trig:
+    amplitude: [0.5, 2.0]
+    clamp: [3, 8]
 
 # Style configuration
 styles:
@@ -220,3 +258,31 @@ labels:
     - "f(x)"
     - "g(x)"
     - "y₁"
+
+# Visual noise configuration
+# These make generated images more realistic (closer to real-world scraped plots)
+noise:
+  enabled: true
+
+  # Matplotlib-level annotations (added before rasterization)
+  annotations:
+    text_annotation: 0.30      # Arrow + text pointing to point on line
+    reference_lines: 0.25      # Horizontal/vertical reference lines (mean, threshold, etc.)
+    shaded_region: 0.20        # fill_between / axvspan for confidence bands
+    data_callout: 0.15         # Annotated specific (x,y) value
+    error_bars: 0.15           # Error bars on sampled points
+    scatter_overlay: 0.20      # Noisy scatter points around a line
+    textbox: 0.25              # Text box with R², p-value, etc.
+    secondary_yaxis: 0.10      # Second y-axis with another curve
+    inset_axes: 0.10           # Zoomed inset of a region
+
+  # Post-rendering image noise (applied to numpy array after matplotlib)
+  image_noise:
+    jpeg_artifacts: 0.30       # JPEG encode/decode at low quality
+    gaussian_blur: 0.15        # Slight blur
+    salt_pepper: 0.10          # Random pixel noise
+    brightness_contrast: 0.25  # Random brightness/contrast shift
+    background_texture: 0.15   # Gradient, paper texture, or perlin-like noise
+    watermark: 0.10            # Semi-transparent text overlay
+    border_padding: 0.20       # Random border then resize back
+    resolution_degrade: 0.15   # Downscale then upscale

@@ -6,10 +6,10 @@ import torch
 from line2former.models import Line2Former, Line2FormerLite
 
 
-def test_line2former():
-    """Test full Line2Former model."""
+def test_line2former(backbone_type='lightweight', pretrained=False):
+    """Test full Line2Former model with a given backbone."""
     print("=" * 60)
-    print("Testing Line2Former")
+    print(f"Testing Line2Former (backbone={backbone_type}, pretrained={pretrained})")
     print("=" * 60)
 
     # Create model
@@ -17,7 +17,8 @@ def test_line2former():
         num_queries=20,
         max_points=50,
         d_model=256,
-        backbone_type='lightweight',
+        backbone_type=backbone_type,
+        pretrained=pretrained,
         num_decoder_layers=6,
         image_size=(480, 640),
     )
@@ -49,6 +50,12 @@ def test_line2former():
             print(f"  {key}: {value.shape}")
     print()
 
+    # Verify shapes
+    assert outputs['centerlines'].shape == (batch_size, 20, 50, 2)
+    assert outputs['widths'].shape == (batch_size, 20, 50)
+    assert outputs['objectness'].shape == (batch_size, 20)
+    assert outputs['masks'].shape == (batch_size, 20, 480, 640)
+
     # Test prediction mode
     predictions = model.predict(images, objectness_threshold=0.5)
     print("Predictions:")
@@ -56,7 +63,7 @@ def test_line2former():
         if isinstance(value, torch.Tensor):
             print(f"  {key}: {value.shape}")
 
-    print("\n✓ Line2Former test passed!")
+    print(f"\n  Line2Former ({backbone_type}) test passed!")
 
 
 def test_line2former_lite():
@@ -100,13 +107,34 @@ def test_line2former_lite():
         if isinstance(value, torch.Tensor):
             print(f"  {key}: {value.shape}")
 
-    print("\n✓ Line2FormerLite test passed!")
+    print("\n  Line2FormerLite test passed!")
 
 
 if __name__ == '__main__':
-    test_line2former()
+    # Always test with lightweight (no dependencies needed)
+    test_line2former(backbone_type='lightweight', pretrained=False)
+
+    # Test with custom HRNet (no pretrained weights needed)
+    test_line2former(backbone_type='hrnet', pretrained=False)
+
+    # Test pretrained backbones if available
+    try:
+        import timm
+        print("\n[timm available] Testing pretrained HRNet backbone...")
+        test_line2former(backbone_type='hrnet_w32', pretrained=True)
+    except ImportError:
+        print("\n[timm not installed] Skipping pretrained HRNet test.")
+        print("  Install with: pip install timm")
+
+    try:
+        import torchvision
+        print("\n[torchvision available] Testing dilated ResNet-50 backbone...")
+        test_line2former(backbone_type='dilated_resnet50', pretrained=True)
+    except ImportError:
+        print("\n[torchvision not installed] Skipping dilated ResNet-50 test.")
+
     test_line2former_lite()
 
     print("\n" + "=" * 60)
-    print("All model tests passed! ✓")
+    print("All model tests passed!")
     print("=" * 60)
